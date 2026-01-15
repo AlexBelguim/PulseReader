@@ -1,6 +1,14 @@
-# PulseReader
+<div align="center">
+  <img src="/logo.png" alt="PulseReader Logo" width="120" />
+  <h1>PulseReader</h1>
+  <p>
+    <b>A modern, high-performance EPUB reader with "Rapid Serial Visual Presentation" (RSVP) speed-reading capabilities.</b>
+  </p>
 
-A modern, high-performance EPUB reader with "Rapid Serial Visual Presentation" (RSVP) speed-reading capabilities.
+  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+  [![Vite](https://img.shields.io/badge/vite-%23646CFF.svg?style=flat&logo=vite&logoColor=white)](https://vitejs.dev/)
+  [![React](https://img.shields.io/badge/react-%2320232a.svg?style=flat&logo=react&logoColor=%2361DAFB)](https://reactjs.org/)
+</div>
 
 ## Features
 
