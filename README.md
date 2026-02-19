@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="/logo.png" alt="PulseReader Logo" width="120" />
+  <img src="public/logo.png" alt="PulseReader Logo" width="120" />
   <h1>PulseReader</h1>
   <p>
     <b>A modern, high-performance EPUB reader with "Rapid Serial Visual Presentation" (RSVP) speed-reading capabilities.</b>

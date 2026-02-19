@@ -603,14 +603,83 @@ input[type="file"] {
   flex-wrap: wrap;
 }
 
+/* RSVP Settings Menu */
+.rsvp-settings-menu {
+  position: absolute;
+  bottom: 100%;
+  left: 20px;
+  background: #1a1a1a;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 1rem;
+  min-width: 250px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  z-index: 20;
+}
+
+.rsvp-setting-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.rsvp-setting-item label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--color-text);
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+
+.rsvp-setting-item input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+}
+
+.rsvp-setting-desc {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  margin-left: 24px;
+}
+
+.rsvp-controls-divider {
+  width: 1px;
+  height: 32px;
+  background: rgba(255, 255, 255, 0.1);
+  margin: 0 0.5rem;
+}
+
+/* Active state for settings button */
+.rsvp-btn.active {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: white;
+}
+
 @media (max-width: 480px) {
   .rsvp-word {
     font-size: 2rem;
   }
 
+  .rsvp-settings-menu {
+    left: 10px;
+    right: 10px;
+    bottom: 110%;
+    min-width: auto;
+  }
+
   .rsvp-main-controls {
     gap: 0.5rem;
   }
+
+  /* ... rest of media queries */
 
   .rsvp-btn {
     width: 40px;
@@ -1170,27 +1239,28 @@ input[type="file"] {
 /* Library Grid */
 .library-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
   padding-bottom: 2rem;
+  align-items: start;
 }
 
 @media (min-width: 480px) {
   .library-grid {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
 @media (min-width: 768px) {
   .library-grid {
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 1.5rem;
   }
 }
 
 @media (min-width: 1024px) {
   .library-grid {
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 }
 
@@ -1198,6 +1268,7 @@ input[type="file"] {
 .book-card {
   cursor: pointer;
   transition: transform 0.2s ease;
+  min-width: 0;
 }
 
 .book-card:hover {
@@ -1206,6 +1277,7 @@ input[type="file"] {
 
 .book-cover {
   position: relative;
+  width: 100%;
   aspect-ratio: 2/3;
   background: var(--color-surface);
   border-radius: var(--radius-md);
@@ -1214,6 +1286,9 @@ input[type="file"] {
 }
 
 .book-cover img {
+  position: absolute;
+  top: 0;
+  left: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
