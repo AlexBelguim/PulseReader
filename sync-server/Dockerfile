@@ -16,7 +16,7 @@ RUN mkdir -p /data/books /data/db
 ENV PORT=3000
 ENV BOOKS_DIR=/data/books
 ENV DATA_DIR=/data
-ENV API_KEY=
+# API_KEY is passed at runtime via -e or docker-compose
 
 EXPOSE 3000
 
