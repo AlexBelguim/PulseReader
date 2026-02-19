@@ -2,8 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import ePub from 'epubjs';
-import { BookOpen, Plus, Trash2, AlertCircle } from 'lucide-react';
-import { getBooks, addBook, deleteBook } from '../services/db';
+import { BookOpen, Plus, Trash2, AlertCircle, Server } from 'lucide-react';
+import { getBooks, addBook, deleteBook, updateBookProgress } from '../services/db';
+import { getSyncConfig, performFullSync } from '../services/syncService';
+import SyncSettings from './SyncSettings';
 
 const Library = () => {
     const navigate = useNavigate();
@@ -12,6 +14,8 @@ const Library = () => {
     const [loading, setLoading] = useState(true);
     const [importing, setImporting] = useState(false);
     const [deleteConfirm, setDeleteConfirm] = useState(null);
+    const [showSyncSettings, setShowSyncSettings] = useState(false);
+    const [syncStatus, setSyncStatus] = useState(null); // 'syncing' | 'success' | 'error' | null
 
     // Load books from IndexedDB
     useEffect(() => {
@@ -27,6 +31,48 @@ const Library = () => {
         };
         loadBooks();
     }, []);
+
+    // Auto-sync on load if configured
+    useEffect(() => {
+        const config = getSyncConfig();
+        if (config.enabled && config.autoSync && config.serverUrl && !loading && books.length >= 0) {
+            handleAutoSync();
+        }
+    }, [loading]);
+
+    const handleAutoSync = async () => {
+        setSyncStatus('syncing');
+        try {
+            const result = await performFullSync(
+                books,
+                async (bookData) => {
+                    const id = await addBook(bookData);
+                    return id;
+                },
+                async (id, location, progress) => {
+                    await updateBookProgress(id, location, progress);
+                }
+            );
+            if (result.synced) {
+                setSyncStatus('success');
+                // Reload books
+                const updatedBooks = await getBooks();
+                setBooks(updatedBooks.reverse());
+            } else {
+                setSyncStatus('error');
+            }
+            setTimeout(() => setSyncStatus(null), 3000);
+        } catch {
+            setSyncStatus('error');
+            setTimeout(() => setSyncStatus(null), 3000);
+        }
+    };
+
+    const handleSyncComplete = async () => {
+        // Reload books after sync
+        const updatedBooks = await getBooks();
+        setBooks(updatedBooks.reverse());
+    };
 
     // Handle file import
     const handleFileChange = async (e) => {
@@ -114,7 +160,7 @@ const Library = () => {
             </header>
 
             <div className="library-content">
-                {/* Add Book Button */}
+                {/* Action Buttons */}
                 <div className="library-actions">
                     <label className={`btn btn-primary ${importing ? 'disabled' : ''}`}>
                         <Plus size={20} />
@@ -127,6 +173,18 @@ const Library = () => {
                             disabled={importing}
                         />
                     </label>
+
+                    <button
+                        className={`btn btn-secondary sync-btn ${syncStatus ? 'sync-' + syncStatus : ''}`}
+                        onClick={() => setShowSyncSettings(true)}
+                        title="Sync Server Settings"
+                    >
+                        <Server size={20} />
+                        Sync
+                        {syncStatus === 'syncing' && <span className="sync-indicator syncing" />}
+                        {syncStatus === 'success' && <span className="sync-indicator success" />}
+                        {syncStatus === 'error' && <span className="sync-indicator error" />}
+                    </button>
                 </div>
 
                 {/* Loading State */}
@@ -248,6 +306,17 @@ const Library = () => {
                             </div>
                         </motion.div>
                     </>
+                )}
+            </AnimatePresence>
+
+            {/* Sync Settings Panel */}
+            <AnimatePresence>
+                {showSyncSettings && (
+                    <SyncSettings
+                        books={books}
+                        onSyncComplete={handleSyncComplete}
+                        onClose={() => setShowSyncSettings(false)}
+                    />
                 )}
             </AnimatePresence>
         </div>

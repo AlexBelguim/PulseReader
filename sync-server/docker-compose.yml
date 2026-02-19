@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  pulsereader-sync:
+    build: .
+    container_name: pulsereader-sync
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/data
+    environment:
+      - PORT=3000
+      - API_KEY=change-me-to-a-secure-key
+      - BOOKS_DIR=/data/books
+      - DATA_DIR=/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

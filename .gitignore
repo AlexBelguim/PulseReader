@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Sync server data
+sync-server/data
+sync-server/node_modules
