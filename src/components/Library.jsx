@@ -56,41 +56,79 @@ const Library = () => {
     }, []);
 
     // Extract covers from epub data for books that don't have covers
+    // Processes in small batches to avoid memory issues
     const extractMissingCovers = async (bookList) => {
-        const booksWithoutCovers = bookList.filter((b) => !b.cover && b.data);
-        if (booksWithoutCovers.length === 0) return;
+        const needsUpdate = bookList.filter(
+            (b) => b.data && (!b.cover || !b.author || b.author === 'Unknown Author')
+        );
+        if (needsUpdate.length === 0) return;
 
-        let updated = false;
-        for (const book of booksWithoutCovers) {
-            try {
-                const epubBook = ePub(book.data);
-                await epubBook.ready;
+        console.log(`Extracting metadata for ${needsUpdate.length} books...`);
+        const BATCH_SIZE = 3;
+        let totalUpdated = 0;
 
-                // Extract cover
-                const coverUrl = await epubBook.coverUrl();
-                if (coverUrl) {
-                    const response = await fetch(coverUrl);
-                    const cover = await response.blob();
-                    await updateBook(book.id, { cover });
-                    updated = true;
-                }
+        for (let i = 0; i < needsUpdate.length; i += BATCH_SIZE) {
+            const batch = needsUpdate.slice(i, i + BATCH_SIZE);
 
-                // Extract author if missing
-                if (!book.author || book.author === 'Unknown Author') {
-                    const metadata = await epubBook.loaded.metadata;
-                    if (metadata.creator) {
-                        await updateBook(book.id, { author: metadata.creator });
-                        updated = true;
+            await Promise.all(batch.map(async (book) => {
+                let epubBook = null;
+                try {
+                    epubBook = ePub(book.data);
+                    await epubBook.ready;
+                    const updates = {};
+
+                    // Extract cover if missing
+                    if (!book.cover) {
+                        try {
+                            const coverUrl = await epubBook.coverUrl();
+                            if (coverUrl) {
+                                const response = await fetch(coverUrl);
+                                updates.cover = await response.blob();
+                            }
+                        } catch {
+                            // Some epubs don't have covers
+                        }
+                    }
+
+                    // Extract author if missing
+                    if (!book.author || book.author === 'Unknown Author') {
+                        try {
+                            const metadata = await epubBook.loaded.metadata;
+                            if (metadata.creator) {
+                                updates.author = metadata.creator;
+                            }
+                        } catch {
+                            // Metadata extraction failed
+                        }
+                    }
+
+                    if (Object.keys(updates).length > 0) {
+                        await updateBook(book.id, updates);
+                        totalUpdated++;
+                    }
+                } catch (err) {
+                    console.warn(`Could not process "${book.title}":`, err);
+                } finally {
+                    if (epubBook) {
+                        try { epubBook.destroy(); } catch { /* ignore */ }
                     }
                 }
+            }));
 
-                epubBook.destroy();
-            } catch (err) {
-                console.warn(`Could not extract cover for "${book.title}":`, err);
+            // Small delay between batches to let GC run
+            if (i + BATCH_SIZE < needsUpdate.length) {
+                await new Promise((r) => setTimeout(r, 100));
+            }
+
+            // Refresh UI periodically
+            if (totalUpdated > 0 && (i + BATCH_SIZE) % 9 === 0) {
+                const refreshed = await getBooks();
+                setBooks(refreshed.reverse());
             }
         }
 
-        if (updated) {
+        if (totalUpdated > 0) {
+            console.log(`Updated metadata for ${totalUpdated} books`);
             const refreshed = await getBooks();
             setBooks(refreshed.reverse());
         }
