@@ -22,6 +22,7 @@ export const addBook = async (bookData) => {
     return db.add('books', {
         ...bookData,
         addedAt: new Date(),
+        isRead: bookData.isRead || false,
     });
 };
 
@@ -35,6 +36,16 @@ export const getBook = async (id) => {
     return db.get('books', id);
 };
 
+export const updateBook = async (id, updates) => {
+    const db = await initDB();
+    const book = await db.get('books', id);
+    if (book) {
+        Object.assign(book, updates);
+        await db.put('books', book);
+    }
+    return book;
+};
+
 export const updateBookProgress = async (id, location, progress) => {
     const db = await initDB();
     const book = await db.get('books', id);
@@ -43,6 +54,17 @@ export const updateBookProgress = async (id, location, progress) => {
         book.progress = progress;
         await db.put('books', book);
     }
+};
+
+export const toggleBookRead = async (id) => {
+    const db = await initDB();
+    const book = await db.get('books', id);
+    if (book) {
+        book.isRead = !book.isRead;
+        await db.put('books', book);
+        return book.isRead;
+    }
+    return false;
 };
 
 export const deleteBook = async (id) => {
