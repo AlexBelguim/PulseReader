@@ -210,9 +210,14 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
         // Build lookup maps
         const serverById = new Map();
         const serverByTitle = new Map();
+        const serverByFileSize = new Map();
         for (const book of serverBooks) {
             serverById.set(book.id, book);
             serverByTitle.set(book.title.toLowerCase(), book);
+            // Use file_size for fuzzy matching (titles may have been renamed)
+            if (book.file_size) {
+                serverByFileSize.set(book.file_size, book);
+            }
         }
 
         const localBySyncId = new Map();
@@ -228,13 +233,13 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
         const matchedServerIds = new Set();
         const matchedLocalIds = new Set();
 
-        // Match books: first by syncId, then by title
+        // Match books: by syncId first, then title, then file size
         const matchedPairs = []; // { localBook, serverBook }
 
         for (const localBook of localBooks) {
             let serverBook = null;
 
-            // Try matching by syncId first
+            // Try matching by syncId first (most reliable)
             if (localBook.syncId && serverById.has(localBook.syncId)) {
                 serverBook = serverById.get(localBook.syncId);
             }
@@ -242,12 +247,20 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
             // Fall back to title matching
             if (!serverBook) {
                 const key = localBook.title.toLowerCase();
-                if (serverByTitle.has(key)) {
+                if (serverByTitle.has(key) && !matchedServerIds.has(serverByTitle.get(key).id)) {
                     serverBook = serverByTitle.get(key);
                 }
             }
 
-            if (serverBook) {
+            // Fall back to file size matching (handles renamed books)
+            if (!serverBook && localBook.data) {
+                const localSize = localBook.data.byteLength || localBook.data.size || 0;
+                if (localSize > 0 && serverByFileSize.has(localSize) && !matchedServerIds.has(serverByFileSize.get(localSize).id)) {
+                    serverBook = serverByFileSize.get(localSize);
+                }
+            }
+
+            if (serverBook && !matchedServerIds.has(serverBook.id)) {
                 matchedPairs.push({ localBook, serverBook });
                 matchedServerIds.add(serverBook.id);
                 matchedLocalIds.add(localBook.id);
