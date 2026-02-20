@@ -180,6 +180,7 @@ export async function triggerRescan() {
 /**
  * Full sync operation — SERVER IS SOURCE OF TRUTH for the book catalog.
  *
+ * 0. Trigger server rescan so the DB reflects current disk state
  * 1. Get server book list
  * 2. Match local books to server books (by syncId, title, or file size)
  * 3. Update local metadata from server for matched books
@@ -206,7 +207,15 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
     };
 
     try {
-        // Get server state
+        // Trigger a rescan first so the server DB reflects current disk state
+        // (handles renamed/moved/deleted files on the server)
+        try {
+            await triggerRescan();
+        } catch (err) {
+            console.warn('Server rescan failed, continuing with existing state:', err.message);
+        }
+
+        // Get server state (now up-to-date after rescan)
         const serverStatus = await getSyncStatus();
         const serverBooks = serverStatus.books;
 
