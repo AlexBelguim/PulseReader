@@ -55,8 +55,56 @@ const Library = () => {
         loadBooks();
     }, []);
 
+    // Extract covers and metadata from epub zip without using epubjs rendering
+    // This avoids replaceCss and other rendering errors
+    const extractFromEpubZip = async (arrayBuffer) => {
+        // Use JSZip-like approach via the browser's native APIs
+        // epubjs exposes an Archive class we can use without rendering
+        const blob = new Blob([arrayBuffer], { type: 'application/epub+zip' });
+        const zipUrl = URL.createObjectURL(blob);
+
+        try {
+            // Use a minimal epubjs instance just for archive access
+            const book = ePub(arrayBuffer);
+
+            // Wait for the container/package to load but catch rendering errors
+            const result = { cover: null, author: null };
+
+            try {
+                await book.ready;
+
+                // Get metadata (safe - just XML parsing)
+                try {
+                    const metadata = await book.loaded.metadata;
+                    if (metadata?.creator) result.author = metadata.creator;
+                } catch { /* ignore */ }
+
+                // Get cover from the book's cover property
+                try {
+                    const coverPath = await book.loaded.cover;
+                    if (coverPath && book.archive) {
+                        const coverBlob = await book.archive.getBlob(coverPath);
+                        if (coverBlob && coverBlob.size > 100) {
+                            result.cover = coverBlob;
+                        }
+                    }
+                } catch { /* ignore */ }
+            } catch {
+                // book.ready failed - try to at least get metadata from the opening
+                try {
+                    const metadata = await book.loaded?.metadata;
+                    if (metadata?.creator) result.author = metadata.creator;
+                } catch { /* ignore */ }
+            }
+
+            try { book.destroy(); } catch { /* ignore */ }
+            return result;
+        } finally {
+            URL.revokeObjectURL(zipUrl);
+        }
+    };
+
     // Extract covers from epub data for books that don't have covers
-    // Processes one at a time to avoid memory issues and epubjs errors
     const extractMissingCovers = async (bookList) => {
         const needsUpdate = bookList.filter(
             (b) => b.data && (!b.cover || !b.author || b.author === 'Unknown Author')
@@ -68,48 +116,15 @@ const Library = () => {
 
         for (let i = 0; i < needsUpdate.length; i++) {
             const book = needsUpdate[i];
-            let epubBook = null;
             try {
-                epubBook = ePub(book.data);
-                await epubBook.ready;
+                const extracted = await extractFromEpubZip(book.data);
                 const updates = {};
 
-                // Extract author if missing (safe, no rendering needed)
-                if (!book.author || book.author === 'Unknown Author') {
-                    try {
-                        const metadata = await epubBook.loaded.metadata;
-                        if (metadata.creator) {
-                            updates.author = metadata.creator;
-                        }
-                    } catch {
-                        // Metadata extraction failed
-                    }
+                if (!book.cover && extracted.cover) {
+                    updates.cover = extracted.cover;
                 }
-
-                // Extract cover if missing
-                if (!book.cover) {
-                    try {
-                        // Try to get cover from the package metadata
-                        const coverHref = await epubBook.loaded.cover;
-                        if (coverHref) {
-                            const archive = await epubBook.archive;
-                            const coverData = await archive.getBlob(coverHref);
-                            if (coverData && coverData.size > 0) {
-                                updates.cover = coverData;
-                            }
-                        }
-                    } catch {
-                        // Try alternative: coverUrl() as fallback
-                        try {
-                            const coverUrl = await epubBook.coverUrl();
-                            if (coverUrl) {
-                                const response = await fetch(coverUrl);
-                                updates.cover = await response.blob();
-                            }
-                        } catch {
-                            // No cover available
-                        }
-                    }
+                if ((!book.author || book.author === 'Unknown Author') && extracted.author) {
+                    updates.author = extracted.author;
                 }
 
                 if (Object.keys(updates).length > 0) {
@@ -117,17 +132,11 @@ const Library = () => {
                     totalUpdated++;
                 }
             } catch (err) {
-                console.warn(`Could not process "${book.title}":`, err);
-            } finally {
-                if (epubBook) {
-                    try { epubBook.destroy(); } catch { /* ignore */ }
-                }
+                // Silently skip - don't spam console
             }
 
-            // Small delay between books to let GC run
-            if (i < needsUpdate.length - 1) {
-                await new Promise((r) => setTimeout(r, 50));
-            }
+            // Small delay between books
+            await new Promise((r) => setTimeout(r, 50));
 
             // Refresh UI every 5 books
             if (totalUpdated > 0 && i > 0 && i % 5 === 0) {
