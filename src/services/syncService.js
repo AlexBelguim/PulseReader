@@ -178,16 +178,18 @@ export async function triggerRescan() {
 }
 
 /**
- * Full sync operation:
+ * Full sync operation — SERVER IS SOURCE OF TRUTH for the book catalog.
+ *
  * 1. Get server book list
- * 2. Compare with local books (by syncId first, then by title)
- * 3. Update local metadata from server for matched books (title, author, series)
+ * 2. Match local books to server books (by syncId, title, or file size)
+ * 3. Update local metadata from server for matched books
  * 4. Upload local covers to server for matched books missing server covers
- * 5. Download new books from server
- * 6. Upload local-only books to server
- * 7. Sync reading progress (last-write-wins)
+ * 5. Download new server books not found locally
+ * 6. Upload truly new local books (no syncId = never been on server) to server
+ * 7. Delete local books that have a syncId but no longer exist on server (server deleted them)
+ * 8. Sync reading progress
  */
-export async function performFullSync(localBooks, addBookFn, updateProgressFn, updateBookFn) {
+export async function performFullSync(localBooks, addBookFn, updateProgressFn, updateBookFn, deleteBookFn) {
     const config = getSyncConfig();
     if (!config.serverUrl) {
         return { synced: false, reason: 'Sync server URL not configured' };
@@ -197,6 +199,7 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
         downloaded: 0,
         uploaded: 0,
         updated: 0,
+        deleted: 0,
         coversUploaded: 0,
         progressSynced: 0,
         errors: [],
@@ -207,26 +210,16 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
         const serverStatus = await getSyncStatus();
         const serverBooks = serverStatus.books;
 
-        // Build lookup maps
+        // Build server lookup maps
         const serverById = new Map();
         const serverByTitle = new Map();
         const serverByFileSize = new Map();
         for (const book of serverBooks) {
             serverById.set(book.id, book);
             serverByTitle.set(book.title.toLowerCase(), book);
-            // Use file_size for fuzzy matching (titles may have been renamed)
             if (book.file_size) {
                 serverByFileSize.set(book.file_size, book);
             }
-        }
-
-        const localBySyncId = new Map();
-        const localByTitle = new Map();
-        for (const book of localBooks) {
-            if (book.syncId) {
-                localBySyncId.set(book.syncId, book);
-            }
-            localByTitle.set(book.title.toLowerCase(), book);
         }
 
         // Track which server books and local books are matched
@@ -267,38 +260,33 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
             }
         }
 
-        // Update local metadata from server for matched books
+        // --- Step 1: Update local metadata from server for matched books ---
         for (const { localBook, serverBook } of matchedPairs) {
             const updates = {};
 
-            // Update syncId if not set
             if (!localBook.syncId) {
                 updates.syncId = serverBook.id;
             }
 
-            // Update title if changed on server
             if (serverBook.title && serverBook.title !== localBook.title) {
                 updates.title = serverBook.title;
             }
 
-            // Update author if changed on server
             if (serverBook.author && serverBook.author !== localBook.author) {
                 updates.author = serverBook.author;
             }
 
-            // Update series if changed on server
             if (serverBook.series && serverBook.series !== localBook.series) {
                 updates.series = serverBook.series;
             }
 
-            // Download cover from server if local book has no cover but server does
             if (!localBook.cover && serverBook.cover_path) {
                 try {
                     const cover = await downloadCover(serverBook.id);
                     if (cover) {
                         updates.cover = cover;
                     }
-                } catch { /* ignore cover download failures */ }
+                } catch { /* ignore */ }
             }
 
             if (Object.keys(updates).length > 0) {
@@ -321,7 +309,7 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
             }
         }
 
-        // Download books that exist on server but not locally
+        // --- Step 2: Download books that exist on server but not locally ---
         for (const serverBook of serverBooks) {
             if (matchedServerIds.has(serverBook.id)) continue;
 
@@ -346,33 +334,43 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
             }
         }
 
-        // Upload books that exist locally but not on server
+        // --- Step 3: Handle unmatched local books ---
         for (const localBook of localBooks) {
             if (matchedLocalIds.has(localBook.id)) continue;
 
-            try {
-                const serverResult = await uploadBook(localBook.data, {
-                    title: localBook.title,
-                    author: localBook.author,
-                    series: localBook.series || 'Uncategorized',
-                    filename: `${localBook.title}.epub`,
-                    cover: localBook.cover,
-                });
-
-                // Store the server ID locally for future syncs
-                if (serverResult?.id) {
-                    try {
-                        await updateBookFn(localBook.id, { syncId: serverResult.id });
-                    } catch { /* ignore */ }
+            if (localBook.syncId) {
+                // This book was previously synced but no longer exists on server → delete locally
+                try {
+                    await deleteBookFn(localBook.id);
+                    results.deleted++;
+                } catch (err) {
+                    results.errors.push(`Failed to delete "${localBook.title}": ${err.message}`);
                 }
+            } else {
+                // This book was added locally and never synced → upload to server
+                try {
+                    const serverResult = await uploadBook(localBook.data, {
+                        title: localBook.title,
+                        author: localBook.author,
+                        series: localBook.series || 'Uncategorized',
+                        filename: `${localBook.title}.epub`,
+                        cover: localBook.cover,
+                    });
 
-                results.uploaded++;
-            } catch (err) {
-                results.errors.push(`Failed to upload "${localBook.title}": ${err.message}`);
+                    if (serverResult?.id) {
+                        try {
+                            await updateBookFn(localBook.id, { syncId: serverResult.id });
+                        } catch { /* ignore */ }
+                    }
+
+                    results.uploaded++;
+                } catch (err) {
+                    results.errors.push(`Failed to upload "${localBook.title}": ${err.message}`);
+                }
             }
         }
 
-        // Sync reading progress
+        // --- Step 4: Sync reading progress ---
         const progressUpdates = [];
         for (const { localBook, serverBook } of matchedPairs) {
             if (localBook.progress > 0) {
@@ -388,7 +386,6 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
         if (progressUpdates.length > 0) {
             const syncResult = await syncProgress(progressUpdates);
 
-            // Apply server progress back to local books
             if (syncResult.progress) {
                 for (const serverProgress of syncResult.progress) {
                     const matched = matchedPairs.find((p) => p.serverBook.id === serverProgress.book_id);

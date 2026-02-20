@@ -21,7 +21,7 @@ import {
     performFullSync,
     triggerRescan,
 } from '../services/syncService';
-import { addBook, updateBookProgress, updateBook } from '../services/db';
+import { addBook, updateBookProgress, updateBook, deleteBook } from '../services/db';
 
 const SyncSettings = ({ books, onSyncComplete, onClose }) => {
     const [config, setConfig] = useState(getSyncConfig());
@@ -70,6 +70,9 @@ const SyncSettings = ({ books, onSyncComplete, onClose }) => {
                 },
                 async (id, updates) => {
                     await updateBook(id, updates);
+                },
+                async (id) => {
+                    await deleteBook(id);
                 }
             );
 
@@ -286,6 +289,9 @@ const SyncSettings = ({ books, onSyncComplete, onClose }) => {
                                                 )}
                                                 {syncResult.updated > 0 && (
                                                     <p>{syncResult.updated} books updated from server</p>
+                                                )}
+                                                {syncResult.deleted > 0 && (
+                                                    <p>{syncResult.deleted} books removed (deleted from server)</p>
                                                 )}
                                                 {syncResult.coversUploaded > 0 && (
                                                     <p>{syncResult.coversUploaded} covers uploaded to server</p>

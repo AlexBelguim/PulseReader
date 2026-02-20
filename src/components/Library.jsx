@@ -204,6 +204,9 @@ const Library = () => {
                 },
                 async (id, updates) => {
                     await updateBook(id, updates);
+                },
+                async (id) => {
+                    await deleteBook(id);
                 }
             );
             if (result.synced) {
