@@ -202,6 +202,48 @@ export function booksRouter(db, booksDir) {
     });
 
     /**
+     * PUT /api/books/:id/cover
+     * Upload or replace a cover image for an existing book
+     */
+    router.put('/:id/cover', upload.single('cover'), (req, res) => {
+        try {
+            const book = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
+            if (!book) {
+                return res.status(404).json({ error: 'Book not found' });
+            }
+
+            if (!req.file) {
+                return res.status(400).json({ error: 'No cover file provided' });
+            }
+
+            // Determine the target cover path: <series>/<title>.<ext>
+            const series = book.series || 'Uncategorized';
+            const ext = path.extname(req.file.originalname) || '.jpg';
+            const coverFilename = path.basename(book.filename, '.epub') + ext;
+            const coverDir = path.join(booksDir, series);
+            const coverFullPath = path.join(coverDir, coverFilename);
+
+            fs.mkdirSync(coverDir, { recursive: true });
+
+            // Move the uploaded file to the correct location
+            const uploadedPath = req.file.path;
+            if (uploadedPath !== coverFullPath) {
+                fs.copyFileSync(uploadedPath, coverFullPath);
+                try { fs.unlinkSync(uploadedPath); } catch { /* ignore */ }
+            }
+
+            const coverRelativePath = path.relative(booksDir, coverFullPath);
+            db.prepare('UPDATE books SET cover_path = ?, updated_at = datetime(\'now\') WHERE id = ?')
+                .run(coverRelativePath, req.params.id);
+
+            const updated = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
+            res.json(updated);
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    /**
      * DELETE /api/books/:id
      * Delete a book (removes from DB, optionally from disk)
      */

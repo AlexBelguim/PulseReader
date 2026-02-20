@@ -201,6 +201,9 @@ const Library = () => {
                 },
                 async (id, location, progress) => {
                     await updateBookProgress(id, location, progress);
+                },
+                async (id, updates) => {
+                    await updateBook(id, updates);
                 }
             );
             if (result.synced) {

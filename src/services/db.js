@@ -1,7 +1,7 @@
 import { openDB } from 'idb';
 
 const DB_NAME = 'pulse-reader-db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export const initDB = async () => {
     return openDB(DB_NAME, DB_VERSION, {
@@ -13,6 +13,7 @@ export const initDB = async () => {
             if (!store.indexNames.contains('title')) store.createIndex('title', 'title');
             if (!store.indexNames.contains('addedAt')) store.createIndex('addedAt', 'addedAt');
             if (!store.indexNames.contains('series')) store.createIndex('series', 'series');
+            if (!store.indexNames.contains('syncId')) store.createIndex('syncId', 'syncId', { unique: false });
         },
     });
 };

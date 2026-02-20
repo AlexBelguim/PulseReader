@@ -21,7 +21,7 @@ import {
     performFullSync,
     triggerRescan,
 } from '../services/syncService';
-import { addBook, updateBookProgress } from '../services/db';
+import { addBook, updateBookProgress, updateBook } from '../services/db';
 
 const SyncSettings = ({ books, onSyncComplete, onClose }) => {
     const [config, setConfig] = useState(getSyncConfig());
@@ -67,6 +67,9 @@ const SyncSettings = ({ books, onSyncComplete, onClose }) => {
                 },
                 async (id, location, progress) => {
                     await updateBookProgress(id, location, progress);
+                },
+                async (id, updates) => {
+                    await updateBook(id, updates);
                 }
             );
 
@@ -280,6 +283,12 @@ const SyncSettings = ({ books, onSyncComplete, onClose }) => {
                                                     <p>
                                                         <Upload size={12} /> {syncResult.uploaded} books uploaded
                                                     </p>
+                                                )}
+                                                {syncResult.updated > 0 && (
+                                                    <p>{syncResult.updated} books updated from server</p>
+                                                )}
+                                                {syncResult.coversUploaded > 0 && (
+                                                    <p>{syncResult.coversUploaded} covers uploaded to server</p>
                                                 )}
                                                 {syncResult.progressSynced > 0 && (
                                                     <p>{syncResult.progressSynced} progress updates synced</p>
