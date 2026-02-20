@@ -10,6 +10,10 @@ import {
     Plus,
     Settings,
     RotateCcw,
+    Eye,
+    FastForward,
+    ChevronsLeft,
+    ChevronsRight,
 } from 'lucide-react';
 
 /**
@@ -20,6 +24,8 @@ const RSVPOverlay = ({
     isOpen,
     onClose,
     rendition,
+    startCfi,
+    startWord,
     wpm: initialWpm = 300,
     onWpmChange,
     onStopAtImage,
@@ -34,47 +40,74 @@ const RSVPOverlay = ({
     const [error, setError] = useState(null);
     const [stoppedAtImage, setStoppedAtImage] = useState(false);
     const [imageStopIndex, setImageStopIndex] = useState(-1);
+    const [showImagePreview, setShowImagePreview] = useState(false);
+    const [currentImageSrc, setCurrentImageSrc] = useState(null);
 
     // Settings State
     const [showSettings, setShowSettings] = useState(false);
-    const [punctuationDelayEnabled, setPunctuationDelayEnabled] = useState(true);
-    const [lengthDelayEnabled, setLengthDelayEnabled] = useState(true);
+    const [sentenceEndMultiplier, setSentenceEndMultiplier] = useState(2.5);   // . ! ?
+    const [clauseMultiplier, setClauseMultiplier] = useState(1.5);             // , ; :
+    const [dashMultiplier, setDashMultiplier] = useState(1.3);                 // hyphenated words
+    const [nameMultiplier, setNameMultiplier] = useState(1.0);                 // capitalized words (names)
+    const [longWordMultiplier, setLongWordMultiplier] = useState(1.05);        // per char over 6
 
     // Refs
     const timerRef = useRef(null);
     const wordsRef = useRef([]);
     const wordElementsRef = useRef([]);
     const lastWordBeforeImageRef = useRef(null);
+    const imageStopPointsRef = useRef([]); // Array of { wordIndex, src }
+    const useStartCfiRef = useRef(true); // Only use startCfi on initial open, not on page nav
 
     // Calculate base interval from WPM
     const getBaseInterval = useCallback(() => {
         return Math.round(60000 / wpm);
     }, [wpm]);
 
-    // Calculate delay for specific word (punctuation and length handling)
+    // Track whether previous word ended a sentence (for name detection)
+    const prevWordEndedSentenceRef = useRef(true); // true at start = first word of text
+
+    // Calculate delay for specific word (punctuation, dashes, names, and length handling)
     const getWordDelay = useCallback((word) => {
         const base = getBaseInterval();
         if (!word) return base;
 
         let multiplier = 1;
         const lastChar = word.slice(-1);
+        const isSentenceEnd = ['.', '!', '?'].includes(lastChar);
 
-        // Punctuation multipliers
-        if (punctuationDelayEnabled) {
-            if (['.', '!', '?'].includes(lastChar)) {
-                multiplier *= 2.5;
-            } else if ([',', ';', ':'].includes(lastChar)) {
-                multiplier *= 1.5;
+        // Sentence-ending punctuation multiplier (. ! ?)
+        if (sentenceEndMultiplier > 1 && isSentenceEnd) {
+            multiplier *= sentenceEndMultiplier;
+        }
+        // Clause punctuation multiplier (, ; :)
+        else if (clauseMultiplier > 1 && [',', ';', ':'].includes(lastChar)) {
+            multiplier *= clauseMultiplier;
+        }
+
+        // Dash/hyphen multiplier for compound words (e.g., "well-known")
+        if (dashMultiplier > 1 && (word.includes('-') || word.includes('—') || word.includes('–'))) {
+            multiplier *= dashMultiplier;
+        }
+
+        // Name/proper noun multiplier (capitalized words not at start of sentence)
+        if (nameMultiplier > 1 && !prevWordEndedSentenceRef.current) {
+            const cleanWord = word.replace(/^["""''([\[{]/, ''); // strip leading quotes/brackets
+            if (cleanWord.length > 0 && cleanWord[0] === cleanWord[0].toUpperCase() && cleanWord[0] !== cleanWord[0].toLowerCase()) {
+                multiplier *= nameMultiplier;
             }
         }
 
-        // Length multiplier: +5% for every character over 6
-        if (lengthDelayEnabled && word.length > 6) {
-            multiplier *= (1 + (word.length - 6) * 0.05);
+        // Update sentence tracking for next word
+        prevWordEndedSentenceRef.current = isSentenceEnd;
+
+        // Length multiplier: per-char increase for every character over 6
+        if (longWordMultiplier > 1 && word.length > 6) {
+            multiplier *= (1 + (word.length - 6) * (longWordMultiplier - 1));
         }
 
         return Math.round(base * multiplier);
-    }, [getBaseInterval, punctuationDelayEnabled, lengthDelayEnabled]);
+    }, [getBaseInterval, sentenceEndMultiplier, clauseMultiplier, dashMultiplier, nameMultiplier, longWordMultiplier]);
 
     // Extract text from current rendition page
     const extractText = useCallback(async () => {
@@ -88,7 +121,10 @@ const RSVPOverlay = ({
             setError(null);
             setStoppedAtImage(false);
             setImageStopIndex(-1);
+            setShowImagePreview(false);
+            setCurrentImageSrc(null);
             lastWordBeforeImageRef.current = null;
+            imageStopPointsRef.current = [];
 
             const contents = rendition.getContents();
             if (!contents || contents.length === 0) {
@@ -99,6 +135,7 @@ const RSVPOverlay = ({
 
             const extractedWords = [];
             const elements = [];
+            const textNodes = []; // Track text nodes for CFI matching
 
             contents.forEach((content) => {
                 const doc = content.document;
@@ -128,11 +165,38 @@ const RSVPOverlay = ({
                 );
 
                 let node;
+                let textWordCount = 0;
                 while ((node = walker.nextNode())) {
                     if (node.nodeType === Node.ELEMENT_NODE) {
+                        // Skip decorative images that appear before any meaningful text
+                        // (e.g., chapter header icons, logos, ornamental dividers)
+                        // Only treat images as stop points if they appear after
+                        // a substantial amount of text (at least 20 words)
+                        if (textWordCount < 20) {
+                            continue;
+                        }
+
+                        // Extract image source URL for preview
+                        let imgSrc = null;
+                        const tag = node.tagName?.toLowerCase();
+                        if (tag === 'img') {
+                            imgSrc = node.src || node.getAttribute('src');
+                        } else if (tag === 'svg') {
+                            // For SVGs, serialize to a data URL
+                            try {
+                                const svgData = new XMLSerializer().serializeToString(node);
+                                imgSrc = 'data:image/svg+xml;base64,' + btoa(svgData);
+                            } catch (e) {
+                                // fallback: no preview available
+                            }
+                        } else if (tag === 'image') {
+                            imgSrc = node.href?.baseVal || node.getAttribute('href') || node.getAttribute('xlink:href');
+                        }
+
                         // Image element - mark as image stop point
-                        extractedWords.push({ text: '__IMAGE__', isImage: true });
+                        extractedWords.push({ text: '__IMAGE__', isImage: true, imgSrc });
                         elements.push({ parent: node.parentElement, isImage: true });
+                        textNodes.push(null);
                         continue;
                     }
 
@@ -140,48 +204,102 @@ const RSVPOverlay = ({
                     if (!text) continue;
 
                     const nodeWords = text.split(/\s+/).filter(w => w.length > 0);
+                    textWordCount += nodeWords.length;
                     nodeWords.forEach((w) => {
                         extractedWords.push({ text: w, isImage: false });
                         elements.push({ parent: node.parentElement, isImage: false });
+                        textNodes.push(node);
                     });
                 }
             });
 
-            // Check for image stop points
-            let stopIdx = -1;
+            // Build list of all image stop points with their word indices and src URLs
+            const allImageStops = [];
+            let textCountSoFar = 0;
             for (let i = 0; i < extractedWords.length; i++) {
                 if (extractedWords[i].isImage) {
-                    stopIdx = i;
-                    break;
+                    allImageStops.push({
+                        wordIndex: textCountSoFar,
+                        src: extractedWords[i].imgSrc,
+                    });
+                } else {
+                    textCountSoFar++;
                 }
             }
+            imageStopPointsRef.current = allImageStops;
 
             // Filter out image markers for display
             const displayWords = extractedWords
                 .filter(w => !w.isImage)
                 .map(w => w.text);
             const displayElements = elements.filter(e => !e.isImage);
+            const displayTextNodes = textNodes.filter((_, i) => !extractedWords[i]?.isImage);
 
-            if (stopIdx >= 0) {
-                // Count actual words before the image
-                const wordsBeforeImage = extractedWords
-                    .slice(0, stopIdx)
-                    .filter(w => !w.isImage)
-                    .map(w => w.text);
-
-                setImageStopIndex(wordsBeforeImage.length);
-                if (wordsBeforeImage.length > 0) {
-                    lastWordBeforeImageRef.current = {
-                        word: wordsBeforeImage[wordsBeforeImage.length - 1],
-                        parent: displayElements[wordsBeforeImage.length - 1]?.parent
-                    };
-                }
+            // Set the first image stop index (if any)
+            if (allImageStops.length > 0) {
+                setImageStopIndex(allImageStops[0].wordIndex);
             }
 
             wordsRef.current = displayWords;
             wordElementsRef.current = displayElements;
             setWords(displayWords);
-            setCurrentIndex(0);
+
+            // Determine starting word index
+            let startIdx = 0;
+
+            // Priority 1: If a specific start word was selected (long-press word pick)
+            if (startWord?.text) {
+                const targetWord = startWord.text.toLowerCase();
+                const targetNode = startWord.node;
+                // Try to match by node first, then by word text
+                let foundByNode = false;
+                if (targetNode) {
+                    for (let i = 0; i < displayTextNodes.length; i++) {
+                        const tn = displayTextNodes[i];
+                        if (tn === targetNode || tn?.parentElement === targetNode) {
+                            startIdx = i;
+                            foundByNode = true;
+                            break;
+                        }
+                    }
+                }
+                if (!foundByNode) {
+                    // Fallback: find the first occurrence of the word
+                    for (let i = 0; i < displayWords.length; i++) {
+                        if (displayWords[i].toLowerCase() === targetWord ||
+                            displayWords[i].toLowerCase().startsWith(targetWord)) {
+                            startIdx = i;
+                            break;
+                        }
+                    }
+                }
+            }
+            // Priority 2: Use CFI to find visible page start position
+            else if (useStartCfiRef.current && startCfi && contents.length > 0) {
+                try {
+                    const content = contents[0];
+                    const range = content.range(startCfi);
+                    if (range) {
+                        const startNode = range.startContainer;
+                        // Find the first word that belongs to or comes after the CFI start node
+                        for (let i = 0; i < displayTextNodes.length; i++) {
+                            const tn = displayTextNodes[i];
+                            if (!tn) continue;
+                            // Check if this text node is the same as or comes after the range start
+                            if (tn === startNode || tn.parentElement === startNode ||
+                                (startNode.compareDocumentPosition &&
+                                 (startNode.compareDocumentPosition(tn) & Node.DOCUMENT_POSITION_FOLLOWING) ||
+                                 startNode === tn)) {
+                                startIdx = i;
+                                break;
+                            }
+                        }
+                    }
+                } catch (err) {
+                    console.log('Could not resolve start CFI for RSVP, starting from beginning:', err);
+                }
+            }
+            setCurrentIndex(startIdx);
         } catch (err) {
             console.error('Failed to extract text:', err);
             setError('Failed to extract text from page');
@@ -193,6 +311,7 @@ const RSVPOverlay = ({
     // Extract text when overlay opens
     useEffect(() => {
         if (isOpen && rendition) {
+            useStartCfiRef.current = true; // Use CFI positioning on initial open
             extractText();
         }
         return () => {
@@ -245,6 +364,13 @@ const RSVPOverlay = ({
                 if (imageStopIndex >= 0 && next >= imageStopIndex) {
                     setIsPlaying(false);
                     setStoppedAtImage(true);
+                    // Find the matching image stop point to get its src
+                    const stopPoint = imageStopPointsRef.current.find(
+                        sp => sp.wordIndex === imageStopIndex
+                    );
+                    if (stopPoint?.src) {
+                        setCurrentImageSrc(stopPoint.src);
+                    }
                     return prev;
                 }
 
@@ -320,6 +446,36 @@ const RSVPOverlay = ({
         setStoppedAtImage(false);
     }, []);
 
+    // Page navigation
+    const goToNextPage = useCallback(async () => {
+        if (!rendition) return;
+        setIsPlaying(false);
+        setStoppedAtImage(false);
+        setShowImagePreview(false);
+        useStartCfiRef.current = false; // Start from beginning of new page
+        try {
+            await rendition.next();
+            // Wait a tick for the new content to render, then re-extract
+            setTimeout(() => extractText(), 100);
+        } catch (err) {
+            console.error('Failed to go to next page:', err);
+        }
+    }, [rendition, extractText]);
+
+    const goToPrevPage = useCallback(async () => {
+        if (!rendition) return;
+        setIsPlaying(false);
+        setStoppedAtImage(false);
+        setShowImagePreview(false);
+        useStartCfiRef.current = false; // Start from beginning of new page
+        try {
+            await rendition.prev();
+            setTimeout(() => extractText(), 100);
+        } catch (err) {
+            console.error('Failed to go to previous page:', err);
+        }
+    }, [rendition, extractText]);
+
     // WPM controls
     const increaseWpm = useCallback(() => {
         setWpm((prev) => {
@@ -337,12 +493,44 @@ const RSVPOverlay = ({
         });
     }, [onWpmChange]);
 
-    // Handle continue to next page (when stopped at image)
-    const handleContinueToNextPage = useCallback(() => {
-        if (onStopAtImage) {
-            onStopAtImage(lastWordBeforeImageRef.current, true);
+    // Handle showing the image in a preview modal
+    const handleShowImage = useCallback(() => {
+        // Find the current image stop point to get its src
+        const stopPoint = imageStopPointsRef.current.find(
+            sp => sp.wordIndex === imageStopIndex
+        );
+        if (stopPoint?.src) {
+            setCurrentImageSrc(stopPoint.src);
         }
-    }, [onStopAtImage]);
+        setShowImagePreview(true);
+    }, [imageStopIndex]);
+
+    // Handle closing the image preview modal
+    const handleCloseImagePreview = useCallback(() => {
+        setShowImagePreview(false);
+    }, []);
+
+    // Handle continuing past the image (skip it and resume reading)
+    const handleContinuePastImage = useCallback(() => {
+        setStoppedAtImage(false);
+        setCurrentImageSrc(null);
+        setShowImagePreview(false);
+
+        // Find the next image stop point after the current one
+        const currentStopIdx = imageStopPointsRef.current.findIndex(
+            sp => sp.wordIndex === imageStopIndex
+        );
+        const nextStop = imageStopPointsRef.current[currentStopIdx + 1];
+
+        if (nextStop) {
+            setImageStopIndex(nextStop.wordIndex);
+        } else {
+            setImageStopIndex(-1); // No more images
+        }
+
+        // Resume playing
+        setIsPlaying(true);
+    }, [imageStopIndex]);
 
     // Keyboard shortcuts
     useEffect(() => {
@@ -356,11 +544,19 @@ const RSVPOverlay = ({
                     break;
                 case 'ArrowLeft':
                     e.preventDefault();
-                    skipBack();
+                    if (e.shiftKey) {
+                        goToPrevPage();
+                    } else {
+                        skipBack();
+                    }
                     break;
                 case 'ArrowRight':
                     e.preventDefault();
-                    skipForward();
+                    if (e.shiftKey) {
+                        goToNextPage();
+                    } else {
+                        skipForward();
+                    }
                     break;
                 case 'ArrowUp':
                     e.preventDefault();
@@ -384,7 +580,7 @@ const RSVPOverlay = ({
 
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [isOpen, togglePlay, skipBack, skipForward, increaseWpm, decreaseWpm, restart, handleClose]);
+    }, [isOpen, togglePlay, skipBack, skipForward, goToPrevPage, goToNextPage, increaseWpm, decreaseWpm, restart, handleClose]);
 
     if (!isOpen) return null;
 
@@ -447,13 +643,25 @@ const RSVPOverlay = ({
                                     initial={{ opacity: 0, y: 10 }}
                                     animate={{ opacity: 1, y: 0 }}
                                 >
-                                    <p>⚠️ Image detected - Reading paused</p>
-                                    <button
-                                        className="btn btn-primary rsvp-continue-btn"
-                                        onClick={handleContinueToNextPage}
-                                    >
-                                        Continue to Next Page →
-                                    </button>
+                                    <p>🖼️ Image detected - Reading paused</p>
+                                    <div className="rsvp-image-actions">
+                                        {currentImageSrc && (
+                                            <button
+                                                className="btn rsvp-show-image-btn"
+                                                onClick={handleShowImage}
+                                            >
+                                                <Eye size={16} />
+                                                Show Image
+                                            </button>
+                                        )}
+                                        <button
+                                            className="btn rsvp-continue-btn"
+                                            onClick={handleContinuePastImage}
+                                        >
+                                            <FastForward size={16} />
+                                            Continue
+                                        </button>
+                                    </div>
                                 </motion.div>
                             )}
 
@@ -478,27 +686,86 @@ const RSVPOverlay = ({
                                 animate={{ opacity: 1, y: 0 }}
                                 exit={{ opacity: 0, y: 10 }}
                             >
+                                <div className="rsvp-settings-title">Delay Multipliers</div>
+
                                 <div className="rsvp-setting-item">
-                                    <label>
-                                        <input
-                                            type="checkbox"
-                                            checked={punctuationDelayEnabled}
-                                            onChange={(e) => setPunctuationDelayEnabled(e.target.checked)}
-                                        />
-                                        Punctuation Pauses
-                                    </label>
-                                    <span className="rsvp-setting-desc">Pause at sentences and clauses</span>
+                                    <div className="rsvp-setting-header">
+                                        <label>Sentence End <span className="rsvp-setting-chars">. ! ?</span></label>
+                                        <span className="rsvp-setting-value">{sentenceEndMultiplier.toFixed(1)}×</span>
+                                    </div>
+                                    <input
+                                        type="range"
+                                        min="1"
+                                        max="5"
+                                        step="0.1"
+                                        value={sentenceEndMultiplier}
+                                        onChange={(e) => setSentenceEndMultiplier(parseFloat(e.target.value))}
+                                        className="rsvp-setting-slider"
+                                    />
                                 </div>
+
                                 <div className="rsvp-setting-item">
-                                    <label>
-                                        <input
-                                            type="checkbox"
-                                            checked={lengthDelayEnabled}
-                                            onChange={(e) => setLengthDelayEnabled(e.target.checked)}
-                                        />
-                                        Long Word Pauses
-                                    </label>
-                                    <span className="rsvp-setting-desc">Slower speed for long words</span>
+                                    <div className="rsvp-setting-header">
+                                        <label>Clauses <span className="rsvp-setting-chars">, ; :</span></label>
+                                        <span className="rsvp-setting-value">{clauseMultiplier.toFixed(1)}×</span>
+                                    </div>
+                                    <input
+                                        type="range"
+                                        min="1"
+                                        max="4"
+                                        step="0.1"
+                                        value={clauseMultiplier}
+                                        onChange={(e) => setClauseMultiplier(parseFloat(e.target.value))}
+                                        className="rsvp-setting-slider"
+                                    />
+                                </div>
+
+                                <div className="rsvp-setting-item">
+                                    <div className="rsvp-setting-header">
+                                        <label>Dashed Words <span className="rsvp-setting-chars">- — –</span></label>
+                                        <span className="rsvp-setting-value">{dashMultiplier.toFixed(1)}×</span>
+                                    </div>
+                                    <input
+                                        type="range"
+                                        min="1"
+                                        max="3"
+                                        step="0.1"
+                                        value={dashMultiplier}
+                                        onChange={(e) => setDashMultiplier(parseFloat(e.target.value))}
+                                        className="rsvp-setting-slider"
+                                    />
+                                </div>
+
+                                <div className="rsvp-setting-item">
+                                    <div className="rsvp-setting-header">
+                                        <label>Names <span className="rsvp-setting-chars">Capitalized</span></label>
+                                        <span className="rsvp-setting-value">{nameMultiplier.toFixed(1)}×</span>
+                                    </div>
+                                    <input
+                                        type="range"
+                                        min="1"
+                                        max="3"
+                                        step="0.1"
+                                        value={nameMultiplier}
+                                        onChange={(e) => setNameMultiplier(parseFloat(e.target.value))}
+                                        className="rsvp-setting-slider"
+                                    />
+                                </div>
+
+                                <div className="rsvp-setting-item">
+                                    <div className="rsvp-setting-header">
+                                        <label>Long Words <span className="rsvp-setting-chars">&gt;6 chars</span></label>
+                                        <span className="rsvp-setting-value">+{Math.round((longWordMultiplier - 1) * 100)}%/char</span>
+                                    </div>
+                                    <input
+                                        type="range"
+                                        min="1"
+                                        max="1.2"
+                                        step="0.01"
+                                        value={longWordMultiplier}
+                                        onChange={(e) => setLongWordMultiplier(parseFloat(e.target.value))}
+                                        className="rsvp-setting-slider"
+                                    />
                                 </div>
                             </motion.div>
                         )}
@@ -528,6 +795,9 @@ const RSVPOverlay = ({
 
                         <div className="rsvp-controls-divider" />
 
+                        <button className="rsvp-btn" onClick={goToPrevPage} title="Previous Page (Shift+←)">
+                            <ChevronsLeft size={20} />
+                        </button>
                         <button className="rsvp-btn" onClick={restart} title="Restart (R)">
                             <RotateCcw size={20} />
                         </button>
@@ -544,6 +814,9 @@ const RSVPOverlay = ({
                         </button>
                         <button className="rsvp-btn" onClick={skipForward} title="Skip Forward 10 (→)">
                             <SkipForward size={20} />
+                        </button>
+                        <button className="rsvp-btn" onClick={goToNextPage} title="Next Page (Shift+→)">
+                            <ChevronsRight size={20} />
                         </button>
 
                         {/* WPM Control */}
@@ -562,11 +835,52 @@ const RSVPOverlay = ({
                     <div className="rsvp-hints">
                         <span>Space: Play/Pause</span>
                         <span>←/→: Skip 10</span>
+                        <span>Shift+←/→: Page</span>
                         <span>↑/↓: Speed</span>
                         <span>Esc: Close</span>
                     </div>
                 </div>
             </motion.div>
+
+            {/* Image Preview Modal */}
+            <AnimatePresence>
+                {showImagePreview && currentImageSrc && (
+                    <motion.div
+                        className="rsvp-image-modal-backdrop"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        onClick={handleCloseImagePreview}
+                    >
+                        <motion.div
+                            className="rsvp-image-modal"
+                            initial={{ opacity: 0, scale: 0.9 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.9 }}
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <button
+                                className="rsvp-image-modal-close"
+                                onClick={handleCloseImagePreview}
+                            >
+                                <X size={20} />
+                            </button>
+                            <img
+                                src={currentImageSrc}
+                                alt="Book image"
+                                className="rsvp-image-modal-img"
+                            />
+                            <button
+                                className="btn rsvp-continue-btn rsvp-image-modal-continue"
+                                onClick={handleContinuePastImage}
+                            >
+                                <FastForward size={16} />
+                                Continue Reading
+                            </button>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
         </AnimatePresence>
     );
 };

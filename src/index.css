@@ -301,6 +301,52 @@ input[type="file"] {
   transform: scale(0.95);
 }
 
+.rsvp-fab-active {
+  background: #ff9800;
+  box-shadow: 0 4px 20px rgba(255, 152, 0, 0.5);
+  animation: rsvp-fab-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes rsvp-fab-pulse {
+  0%, 100% { box-shadow: 0 4px 20px rgba(255, 152, 0, 0.4); }
+  50% { box-shadow: 0 4px 30px rgba(255, 152, 0, 0.7); }
+}
+
+/* Word Selection Banner */
+.word-select-banner {
+  position: fixed;
+  top: 70px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1.5rem;
+  background: rgba(255, 152, 0, 0.95);
+  color: #000;
+  border-radius: var(--radius-lg);
+  font-weight: 600;
+  font-size: 0.9rem;
+  z-index: 200;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  white-space: nowrap;
+}
+
+.word-select-banner button {
+  background: rgba(0, 0, 0, 0.2);
+  border: none;
+  color: #000;
+  padding: 0.35rem 0.75rem;
+  border-radius: var(--radius-md);
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.word-select-banner button:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
 /* ================================
    RSVP OVERLAY STYLES
    ================================ */
@@ -468,15 +514,106 @@ input[type="file"] {
   margin: 0;
 }
 
+.rsvp-image-actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.rsvp-show-image-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  padding: 0.6rem 1.2rem;
+  font-weight: 600;
+  color: #fff;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.rsvp-show-image-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
 .rsvp-continue-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   background: linear-gradient(135deg, #4caf50 0%, #2e7d32 100%);
   border: none;
-  padding: 0.75rem 1.5rem;
+  padding: 0.6rem 1.2rem;
   font-weight: 600;
+  color: #fff;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.2s ease;
 }
 
 .rsvp-continue-btn:hover {
   filter: brightness(1.1);
+}
+
+/* Image Preview Modal */
+.rsvp-image-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10001;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+
+.rsvp-image-modal {
+  position: relative;
+  max-width: 90vw;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+  background: rgba(30, 30, 30, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.rsvp-image-modal-close {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  background: rgba(255, 255, 255, 0.1);
+  border: none;
+  border-radius: 50%;
+  width: 2rem;
+  height: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.rsvp-image-modal-close:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.rsvp-image-modal-img {
+  max-width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+}
+
+.rsvp-image-modal-continue {
+  margin-top: 0.5rem;
 }
 
 /* Disabled play button */
@@ -500,12 +637,14 @@ input[type="file"] {
 }
 
 .rsvp-controls {
+  position: relative;
   padding: 1.5rem;
   background: rgba(0, 0, 0, 0.5);
   border-top: 1px solid rgba(255, 255, 255, 0.1);
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  overflow: visible;
 }
 
 .rsvp-progress {
@@ -606,47 +745,96 @@ input[type="file"] {
 /* RSVP Settings Menu */
 .rsvp-settings-menu {
   position: absolute;
-  bottom: 100%;
+  bottom: calc(100% + 0.5rem);
   left: 20px;
   background: #1a1a1a;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  padding: 1rem;
-  min-width: 250px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  padding: 1rem 1.25rem;
+  min-width: 280px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
   display: flex;
   flex-direction: column;
-  gap: 1rem;
-  z-index: 20;
+  gap: 0.75rem;
+  z-index: 1000;
+}
+
+.rsvp-settings-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.25rem;
 }
 
 .rsvp-setting-item {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.35rem;
 }
 
-.rsvp-setting-item label {
+.rsvp-setting-header {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.rsvp-setting-header label {
   color: var(--color-text);
   font-weight: 500;
-  cursor: pointer;
+  font-size: 0.875rem;
   user-select: none;
 }
 
-.rsvp-setting-item input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--color-primary);
+.rsvp-setting-chars {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  font-weight: 400;
+  margin-left: 0.35rem;
+}
+
+.rsvp-setting-value {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  min-width: 4.5rem;
+  text-align: right;
+}
+
+.rsvp-setting-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+  outline: none;
   cursor: pointer;
 }
 
-.rsvp-setting-desc {
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
-  margin-left: 24px;
+.rsvp-setting-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+.rsvp-setting-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+.rsvp-setting-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  border: none;
+  cursor: pointer;
 }
 
 .rsvp-controls-divider {

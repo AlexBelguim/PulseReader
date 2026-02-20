@@ -42,6 +42,9 @@ const Reader = () => {
     const [showTOC, setShowTOC] = useState(false);
     const [showUI, setShowUI] = useState(true);
     const [showRSVP, setShowRSVP] = useState(false);
+    const [wordSelectMode, setWordSelectMode] = useState(false);
+    const [rsvpStartWord, setRsvpStartWord] = useState(null); // { text, node }
+    const longPressTimerRef = useRef(null);
 
     // Settings hook
     const {
@@ -203,6 +206,34 @@ const Reader = () => {
                             renditionRef.current.display(startLocation);
                         }
                     }, 100);
+
+                    // Flash the resumed position to show user where they left off
+                    setTimeout(() => {
+                        try {
+                            const contents = renditionRef.current?.getContents();
+                            if (contents && contents.length > 0) {
+                                const range = contents[0].range(startLocation);
+                                if (range) {
+                                    const el = range.startContainer.nodeType === Node.ELEMENT_NODE
+                                        ? range.startContainer
+                                        : range.startContainer.parentElement;
+                                    if (el) {
+                                        el.style.transition = 'background-color 0.5s ease, box-shadow 0.5s ease';
+                                        el.style.backgroundColor = 'rgba(255, 75, 75, 0.25)';
+                                        el.style.boxShadow = '0 0 8px rgba(255, 75, 75, 0.4)';
+                                        el.style.borderRadius = '4px';
+                                        setTimeout(() => {
+                                            el.style.backgroundColor = '';
+                                            el.style.boxShadow = '';
+                                            el.style.borderRadius = '';
+                                        }, 3000);
+                                    }
+                                }
+                            }
+                        } catch (err) {
+                            // Silently fail - flash is just a visual hint
+                        }
+                    }, 500);
                 } else {
                     await rendition.display();
                 }
@@ -355,12 +386,86 @@ const Reader = () => {
         }
     }, []);
 
-    // Handle RSVP button click
+    // Handle RSVP button - click for normal start, long-press for word selection
     const handleRSVPClick = useCallback((e) => {
         e.stopPropagation();
+        if (wordSelectMode) {
+            // Cancel word selection mode
+            setWordSelectMode(false);
+            return;
+        }
+        setRsvpStartWord(null);
         setShowRSVP(true);
-        setShowUI(false); // Hide other UI when RSVP is open
+        setShowUI(false);
+    }, [wordSelectMode]);
+
+    const handleRSVPPointerDown = useCallback((e) => {
+        longPressTimerRef.current = setTimeout(() => {
+            e.preventDefault?.();
+            setWordSelectMode(true);
+        }, 600);
     }, []);
+
+    const handleRSVPPointerUp = useCallback(() => {
+        if (longPressTimerRef.current) {
+            clearTimeout(longPressTimerRef.current);
+            longPressTimerRef.current = null;
+        }
+    }, []);
+
+    // Word selection mode: listen for clicks on words in the epub content
+    useEffect(() => {
+        if (!wordSelectMode || !renditionRef.current) return;
+
+        const contents = renditionRef.current.getContents();
+        if (!contents || contents.length === 0) return;
+
+        const handleWordClick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+
+            const selection = contents[0].window.getSelection();
+            // Try to get the clicked word
+            let clickedWord = '';
+            let clickedNode = null;
+
+            if (selection && selection.rangeCount > 0) {
+                // Expand selection to word
+                selection.modify('move', 'backward', 'word');
+                selection.modify('extend', 'forward', 'word');
+                clickedWord = selection.toString().trim();
+                if (selection.anchorNode) {
+                    clickedNode = selection.anchorNode;
+                }
+                selection.removeAllRanges();
+            }
+
+            if (!clickedWord && e.target) {
+                // Fallback: use the text content of the clicked element
+                clickedWord = e.target.textContent?.trim().split(/\s+/)[0] || '';
+                clickedNode = e.target;
+            }
+
+            if (clickedWord) {
+                setRsvpStartWord({ text: clickedWord, node: clickedNode });
+                setWordSelectMode(false);
+                setShowRSVP(true);
+                setShowUI(false);
+            }
+        };
+
+        // Add click listener to the epub content
+        const doc = contents[0].document;
+        doc.addEventListener('click', handleWordClick, true);
+
+        // Add visual indicator
+        doc.body.style.cursor = 'crosshair';
+
+        return () => {
+            doc.removeEventListener('click', handleWordClick, true);
+            doc.body.style.cursor = '';
+        };
+    }, [wordSelectMode]);
 
     // Handle RSVP close - highlight the last read word for 5 seconds
     const handleRSVPCloseWithPosition = useCallback((wordInfo) => {
@@ -564,18 +669,36 @@ const Reader = () => {
                 }}
             />
 
+            {/* Word Selection Mode Banner */}
+            <AnimatePresence>
+                {wordSelectMode && (
+                    <motion.div
+                        className="word-select-banner"
+                        initial={{ opacity: 0, y: -20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -20 }}
+                    >
+                        <span>👆 Tap a word to start RSVP from there</span>
+                        <button onClick={() => setWordSelectMode(false)}>Cancel</button>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
             {/* RSVP FAB Button */}
             <AnimatePresence>
                 {showUI && (
                     <motion.button
-                        className="rsvp-fab"
+                        className={`rsvp-fab ${wordSelectMode ? 'rsvp-fab-active' : ''}`}
                         initial={{ scale: 0, opacity: 0 }}
                         animate={{ scale: 1, opacity: 1 }}
                         exit={{ scale: 0, opacity: 0 }}
                         whileHover={{ scale: 1.1 }}
                         whileTap={{ scale: 0.9 }}
                         onClick={handleRSVPClick}
-                        title="RSVP Speed Reading"
+                        onPointerDown={handleRSVPPointerDown}
+                        onPointerUp={handleRSVPPointerUp}
+                        onPointerLeave={handleRSVPPointerUp}
+                        title="RSVP Speed Reading (long-press to pick start word)"
                     >
                         <Zap size={24} />
                     </motion.button>
@@ -654,8 +777,11 @@ const Reader = () => {
                 onClose={() => {
                     setShowRSVP(false);
                     setShowUI(true);
+                    setRsvpStartWord(null);
                 }}
                 rendition={renditionRef.current}
+                startCfi={lastLocationRef.current}
+                startWord={rsvpStartWord}
                 wpm={settings.rsvpSpeed}
                 onWpmChange={(newWpm) => updateSetting('rsvpSpeed', newWpm)}
                 onStopAtImage={handleRSVPStopAtImage}
