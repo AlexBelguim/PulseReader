@@ -12,6 +12,7 @@ import {
     Check,
     BookMarked,
     Edit3,
+    ImagePlus,
 } from 'lucide-react';
 import {
     getBooks,
@@ -28,6 +29,7 @@ const Library = () => {
     const navigate = useNavigate();
     const fileInputRef = useRef(null);
     const seriesFileInputRef = useRef(null);
+    const coverInputRef = useRef(null);
     const [books, setBooks] = useState([]);
     const [loading, setLoading] = useState(true);
     const [importing, setImporting] = useState(false);
@@ -35,8 +37,9 @@ const Library = () => {
     const [showSyncSettings, setShowSyncSettings] = useState(false);
     const [syncStatus, setSyncStatus] = useState(null);
     const [selectedSeries, setSelectedSeries] = useState(null);
-    const [editingSeries, setEditingSeries] = useState(null); // book id being edited
+    const [editingSeries, setEditingSeries] = useState(null);
     const [seriesInput, setSeriesInput] = useState('');
+    const [coverUploadTarget, setCoverUploadTarget] = useState(null); // book id for cover upload
 
     // Load books from IndexedDB
     useEffect(() => {
@@ -55,53 +58,48 @@ const Library = () => {
         loadBooks();
     }, []);
 
-    // Extract covers and metadata from epub zip without using epubjs rendering
-    // This avoids replaceCss and other rendering errors
+    // Extract covers and metadata from epub without console error spam
     const extractFromEpubZip = async (arrayBuffer) => {
-        // Use JSZip-like approach via the browser's native APIs
-        // epubjs exposes an Archive class we can use without rendering
-        const blob = new Blob([arrayBuffer], { type: 'application/epub+zip' });
-        const zipUrl = URL.createObjectURL(blob);
+        const result = { cover: null, author: null };
 
+        // Temporarily suppress console.error to hide epubjs internal errors
+        const originalError = console.error;
+        const originalWarn = console.warn;
+        console.error = () => {};
+        console.warn = () => {};
+
+        let book = null;
         try {
-            // Use a minimal epubjs instance just for archive access
-            const book = ePub(arrayBuffer);
+            book = ePub(arrayBuffer);
+            await book.ready;
 
-            // Wait for the container/package to load but catch rendering errors
-            const result = { cover: null, author: null };
-
+            // Get metadata
             try {
-                await book.ready;
+                const metadata = await book.loaded.metadata;
+                if (metadata?.creator) result.author = metadata.creator;
+            } catch { /* ignore */ }
 
-                // Get metadata (safe - just XML parsing)
-                try {
-                    const metadata = await book.loaded.metadata;
-                    if (metadata?.creator) result.author = metadata.creator;
-                } catch { /* ignore */ }
-
-                // Get cover from the book's cover property
-                try {
-                    const coverPath = await book.loaded.cover;
-                    if (coverPath && book.archive) {
-                        const coverBlob = await book.archive.getBlob(coverPath);
-                        if (coverBlob && coverBlob.size > 100) {
-                            result.cover = coverBlob;
-                        }
+            // Get cover
+            try {
+                const coverPath = await book.loaded.cover;
+                if (coverPath && book.archive) {
+                    const coverBlob = await book.archive.getBlob(coverPath);
+                    if (coverBlob && coverBlob.size > 100) {
+                        result.cover = coverBlob;
                     }
-                } catch { /* ignore */ }
-            } catch {
-                // book.ready failed - try to at least get metadata from the opening
-                try {
-                    const metadata = await book.loaded?.metadata;
-                    if (metadata?.creator) result.author = metadata.creator;
-                } catch { /* ignore */ }
-            }
-
-            try { book.destroy(); } catch { /* ignore */ }
-            return result;
+                }
+            } catch { /* ignore */ }
+        } catch {
+            // book.ready failed - some epubs can't be parsed
         } finally {
-            URL.revokeObjectURL(zipUrl);
+            console.error = originalError;
+            console.warn = originalWarn;
+            if (book) {
+                try { book.destroy(); } catch { /* ignore */ }
+            }
         }
+
+        return result;
     };
 
     // Extract covers from epub data for books that don't have covers
@@ -226,6 +224,30 @@ const Library = () => {
         setBooks(updatedBooks.reverse());
         // Extract covers/authors in background after sync
         extractMissingCovers(updatedBooks);
+    };
+
+    // Handle manual cover upload
+    const handleCoverUpload = async (e) => {
+        const file = e.target.files?.[0];
+        if (!file || !coverUploadTarget) return;
+
+        try {
+            const cover = file; // File is already a Blob
+            await updateBook(coverUploadTarget, { cover });
+            setBooks((prev) =>
+                prev.map((b) => (b.id === coverUploadTarget ? { ...b, cover } : b))
+            );
+        } catch (err) {
+            console.error('Failed to set cover:', err);
+        }
+        setCoverUploadTarget(null);
+        if (coverInputRef.current) coverInputRef.current.value = '';
+    };
+
+    const triggerCoverUpload = (e, bookId) => {
+        e.stopPropagation();
+        setCoverUploadTarget(bookId);
+        coverInputRef.current?.click();
     };
 
     // Handle file import (with optional series context)
@@ -393,6 +415,13 @@ const Library = () => {
                                         </button>
                                         <button
                                             className="book-action-btn"
+                                            onClick={(e) => triggerCoverUpload(e, book.id)}
+                                            title="Set cover image"
+                                        >
+                                            <ImagePlus size={14} />
+                                        </button>
+                                        <button
+                                            className="book-action-btn"
                                             onClick={(e) => {
                                                 e.stopPropagation();
                                                 setEditingSeries(book.id);
@@ -522,6 +551,15 @@ const Library = () => {
 
     return (
         <div className="library-container">
+            {/* Hidden cover upload input */}
+            <input
+                ref={coverInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleCoverUpload}
+                style={{ display: 'none' }}
+            />
+
             <header className="library-header">
                 <h1>
                     <BookOpen size={32} />
