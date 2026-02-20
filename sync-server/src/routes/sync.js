@@ -57,20 +57,21 @@ export function syncRouter(db, booksDir) {
                 return res.status(400).json({ error: 'Expected progress array' });
             }
 
+            // Highest-progress-wins: only update if incoming progress is higher
             const upsert = db.prepare(`
                 INSERT INTO reading_progress (book_id, location, progress, updated_at)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(book_id) DO UPDATE SET
                     location = CASE 
-                        WHEN excluded.updated_at > reading_progress.updated_at THEN excluded.location
+                        WHEN excluded.progress > reading_progress.progress THEN excluded.location
                         ELSE reading_progress.location
                     END,
                     progress = CASE
-                        WHEN excluded.updated_at > reading_progress.updated_at THEN excluded.progress
+                        WHEN excluded.progress > reading_progress.progress THEN excluded.progress
                         ELSE reading_progress.progress
                     END,
                     updated_at = CASE
-                        WHEN excluded.updated_at > reading_progress.updated_at THEN excluded.updated_at
+                        WHEN excluded.progress > reading_progress.progress THEN excluded.updated_at
                         ELSE reading_progress.updated_at
                     END
             `);

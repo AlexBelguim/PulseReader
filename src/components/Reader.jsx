@@ -221,7 +221,23 @@ const Reader = () => {
 
         initReader();
 
+        // Handle screen resize (Samsung Fold, orientation change, etc.)
+        let resizeTimeout;
+        const handleResize = () => {
+            clearTimeout(resizeTimeout);
+            resizeTimeout = setTimeout(() => {
+                if (renditionRef.current && lastLocationRef.current) {
+                    renditionRef.current.resize('100%', '100%');
+                    renditionRef.current.display(lastLocationRef.current);
+                }
+            }, 300); // Debounce to avoid rapid re-renders during fold animation
+        };
+
+        window.addEventListener('resize', handleResize);
+
         return () => {
+            window.removeEventListener('resize', handleResize);
+            clearTimeout(resizeTimeout);
             if (renditionRef.current) {
                 renditionRef.current.destroy();
             }
