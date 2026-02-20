@@ -44,6 +44,8 @@ const Library = () => {
             try {
                 const storedBooks = await getBooks();
                 setBooks(storedBooks.reverse());
+                // Extract covers for books that are missing them
+                extractMissingCovers(storedBooks);
             } catch (err) {
                 console.error('Failed to load books:', err);
             } finally {
@@ -52,6 +54,47 @@ const Library = () => {
         };
         loadBooks();
     }, []);
+
+    // Extract covers from epub data for books that don't have covers
+    const extractMissingCovers = async (bookList) => {
+        const booksWithoutCovers = bookList.filter((b) => !b.cover && b.data);
+        if (booksWithoutCovers.length === 0) return;
+
+        let updated = false;
+        for (const book of booksWithoutCovers) {
+            try {
+                const epubBook = ePub(book.data);
+                await epubBook.ready;
+
+                // Extract cover
+                const coverUrl = await epubBook.coverUrl();
+                if (coverUrl) {
+                    const response = await fetch(coverUrl);
+                    const cover = await response.blob();
+                    await updateBook(book.id, { cover });
+                    updated = true;
+                }
+
+                // Extract author if missing
+                if (!book.author || book.author === 'Unknown Author') {
+                    const metadata = await epubBook.loaded.metadata;
+                    if (metadata.creator) {
+                        await updateBook(book.id, { author: metadata.creator });
+                        updated = true;
+                    }
+                }
+
+                epubBook.destroy();
+            } catch (err) {
+                console.warn(`Could not extract cover for "${book.title}":`, err);
+            }
+        }
+
+        if (updated) {
+            const refreshed = await getBooks();
+            setBooks(refreshed.reverse());
+        }
+    };
 
     // Auto-sync on load if configured
     useEffect(() => {
@@ -357,6 +400,14 @@ const Library = () => {
                         const cover = getSeriesCover(seriesBooks);
                         const readCount = seriesBooks.filter((b) => b.isRead || b.progress >= 0.95).length;
                         const totalCount = seriesBooks.length;
+                        // Get the most common author in the series
+                        const authorCounts = {};
+                        for (const b of seriesBooks) {
+                            const a = b.author || 'Unknown Author';
+                            authorCounts[a] = (authorCounts[a] || 0) + 1;
+                        }
+                        const seriesAuthor = Object.entries(authorCounts)
+                            .sort((a, b) => b[1] - a[1])[0]?.[0] || '';
 
                         return (
                             <motion.div
@@ -396,7 +447,8 @@ const Library = () => {
 
                                 <div className="book-info">
                                     <h3 className="book-title">{seriesName}</h3>
-                                    <p className="book-author">
+                                    <p className="book-author">{seriesAuthor}</p>
+                                    <p className="book-author series-read-count">
                                         {readCount}/{totalCount} read
                                     </p>
                                 </div>

@@ -206,11 +206,45 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn) {
             if (!localByTitle.has(key)) {
                 try {
                     const epubData = await downloadBook(serverBook.id);
-                    const cover = await downloadCover(serverBook.id);
+                    let cover = await downloadCover(serverBook.id);
+
+                    // If no cover from server, extract from epub
+                    if (!cover) {
+                        try {
+                            const { default: ePub } = await import('epubjs');
+                            const book = ePub(epubData);
+                            await book.ready;
+                            const coverUrl = await book.coverUrl();
+                            if (coverUrl) {
+                                const response = await fetch(coverUrl);
+                                cover = await response.blob();
+                            }
+                            book.destroy();
+                        } catch (coverErr) {
+                            console.warn('Could not extract cover from epub:', coverErr);
+                        }
+                    }
+
+                    // Extract author from epub if server has "Unknown Author"
+                    let author = serverBook.author;
+                    if (!author || author === 'Unknown Author') {
+                        try {
+                            const { default: ePub } = await import('epubjs');
+                            const book = ePub(epubData);
+                            await book.ready;
+                            const metadata = await book.loaded.metadata;
+                            if (metadata.creator) {
+                                author = metadata.creator;
+                            }
+                            book.destroy();
+                        } catch (metaErr) {
+                            console.warn('Could not extract metadata from epub:', metaErr);
+                        }
+                    }
 
                     await addBookFn({
                         title: serverBook.title,
-                        author: serverBook.author,
+                        author: author,
                         series: serverBook.series,
                         cover: cover,
                         data: epubData,
