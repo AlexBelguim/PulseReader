@@ -21,6 +21,7 @@ import {
     performFullSync,
     triggerRescan,
 } from '../services/syncService';
+import { addBook, updateBookProgress } from '../services/db';
 
 const SyncSettings = ({ books, onSyncComplete, onClose }) => {
     const [config, setConfig] = useState(getSyncConfig());
@@ -61,11 +62,11 @@ const SyncSettings = ({ books, onSyncComplete, onClose }) => {
             const result = await performFullSync(
                 books,
                 async (bookData) => {
-                    // This will be handled by the parent component
-                    return bookData;
+                    const id = await addBook(bookData);
+                    return id;
                 },
                 async (id, location, progress) => {
-                    // This will be handled by the parent component
+                    await updateBookProgress(id, location, progress);
                 }
             );
 

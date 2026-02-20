@@ -173,8 +173,8 @@ export async function triggerRescan() {
  */
 export async function performFullSync(localBooks, addBookFn, updateProgressFn) {
     const config = getSyncConfig();
-    if (!config.enabled || !config.serverUrl) {
-        return { synced: false, reason: 'Sync not configured' };
+    if (!config.serverUrl) {
+        return { synced: false, reason: 'Sync server URL not configured' };
     }
 
     const results = {
