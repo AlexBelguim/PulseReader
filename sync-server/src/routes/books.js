@@ -122,6 +122,69 @@ export function booksRouter(db, booksDir) {
     });
 
     /**
+     * PUT /api/books/series/rename
+     * Rename a series — updates all books in the series and moves files on disk
+     */
+    router.put('/series/rename', (req, res) => {
+        try {
+            const { oldName, newName } = req.body;
+            if (!oldName || !newName) {
+                return res.status(400).json({ error: 'Both oldName and newName are required' });
+            }
+
+            const booksInSeries = db.prepare('SELECT * FROM books WHERE series = ?').all(oldName);
+            if (booksInSeries.length === 0) {
+                return res.status(404).json({ error: `No books found in series "${oldName}"` });
+            }
+
+            const oldDir = path.join(booksDir, oldName);
+            const newDir = path.join(booksDir, newName);
+            fs.mkdirSync(newDir, { recursive: true });
+
+            // Move each file and update DB
+            for (const book of booksInSeries) {
+                const oldFilePath = path.join(booksDir, book.filepath);
+                const newFilePath = path.join(newDir, book.filename);
+
+                if (fs.existsSync(oldFilePath)) {
+                    fs.renameSync(oldFilePath, newFilePath);
+                }
+
+                // Move cover if it's in the old series directory
+                if (book.cover_path) {
+                    const oldCoverPath = path.join(booksDir, book.cover_path);
+                    const coverFilename = path.basename(book.cover_path);
+                    const newCoverPath = path.join(newDir, coverFilename);
+
+                    if (fs.existsSync(oldCoverPath)) {
+                        fs.renameSync(oldCoverPath, newCoverPath);
+                    }
+
+                    const newCoverRelative = path.relative(booksDir, newCoverPath);
+                    db.prepare('UPDATE books SET cover_path = ? WHERE id = ?').run(newCoverRelative, book.id);
+                }
+
+                const newRelativePath = path.relative(booksDir, newFilePath);
+                db.prepare(`
+                    UPDATE books SET series = ?, filepath = ?, updated_at = datetime('now') WHERE id = ?
+                `).run(newName, newRelativePath, book.id);
+            }
+
+            // Try to remove old directory if empty
+            try {
+                const remaining = fs.readdirSync(oldDir);
+                if (remaining.length === 0) {
+                    fs.rmdirSync(oldDir);
+                }
+            } catch { /* ignore */ }
+
+            res.json({ success: true, updated: booksInSeries.length });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    /**
      * POST /api/books
      * Upload a new book (epub + optional cover)
      */

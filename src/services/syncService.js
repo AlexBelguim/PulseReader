@@ -178,6 +178,28 @@ export async function triggerRescan() {
 }
 
 /**
+ * Rename a series on the server (moves files on disk + updates DB)
+ */
+export async function renameSeries(oldName, newName) {
+    const response = await syncFetch('/api/books/series/rename', {
+        method: 'PUT',
+        body: JSON.stringify({ oldName, newName }),
+    });
+    return response.json();
+}
+
+/**
+ * Update a book's metadata on the server
+ */
+export async function updateServerBook(bookId, updates) {
+    const response = await syncFetch(`/api/books/${bookId}`, {
+        method: 'PUT',
+        body: JSON.stringify(updates),
+    });
+    return response.json();
+}
+
+/**
  * Full sync operation — SERVER IS SOURCE OF TRUTH for the book catalog.
  *
  * 0. Trigger server rescan so the DB reflects current disk state

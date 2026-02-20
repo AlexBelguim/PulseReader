@@ -13,6 +13,7 @@ import {
     BookMarked,
     Edit3,
     ImagePlus,
+    User,
 } from 'lucide-react';
 import {
     getBooks,
@@ -22,7 +23,7 @@ import {
     updateBook,
     toggleBookRead,
 } from '../services/db';
-import { getSyncConfig, performFullSync } from '../services/syncService';
+import { getSyncConfig, performFullSync, renameSeries, updateServerBook } from '../services/syncService';
 import SyncSettings from './SyncSettings';
 
 const Library = () => {
@@ -40,6 +41,10 @@ const Library = () => {
     const [editingSeries, setEditingSeries] = useState(null);
     const [seriesInput, setSeriesInput] = useState('');
     const [coverUploadTarget, setCoverUploadTarget] = useState(null); // book id for cover upload
+    const [renamingSeriesName, setRenamingSeriesName] = useState(null); // series name being renamed
+    const [renameSeriesInput, setRenameSeriesInput] = useState('');
+    const [editingAuthor, setEditingAuthor] = useState(null); // book id for author edit
+    const [authorInput, setAuthorInput] = useState('');
 
     // Load books from IndexedDB
     useEffect(() => {
@@ -335,6 +340,63 @@ const Library = () => {
         setSeriesInput('');
     };
 
+    const handleRenameSeries = async (oldName, newName) => {
+        if (!oldName || !newName || oldName === newName) return;
+
+        const config = getSyncConfig();
+        if (config.serverUrl) {
+            try {
+                await renameSeries(oldName, newName);
+            } catch (err) {
+                console.error('Failed to rename series on server:', err);
+            }
+        }
+
+        // Update all local books in this series
+        for (const book of books) {
+            if (book.series === oldName) {
+                await updateBook(book.id, { series: newName });
+            }
+        }
+        setBooks((prev) =>
+            prev.map((b) => (b.series === oldName ? { ...b, series: newName } : b))
+        );
+
+        // Update selectedSeries if we're viewing the renamed series
+        if (selectedSeries === oldName) {
+            setSelectedSeries(newName);
+        }
+
+        setRenamingSeriesName(null);
+        setRenameSeriesInput('');
+    };
+
+    const handleAuthorChange = async (bookId, newAuthor) => {
+        if (!newAuthor) return;
+
+        // Update locally
+        await updateBook(bookId, { author: newAuthor });
+        setBooks((prev) =>
+            prev.map((b) => (b.id === bookId ? { ...b, author: newAuthor } : b))
+        );
+
+        // Update on server if synced
+        const book = books.find((b) => b.id === bookId);
+        if (book?.syncId) {
+            const config = getSyncConfig();
+            if (config.serverUrl) {
+                try {
+                    await updateServerBook(book.syncId, { author: newAuthor });
+                } catch (err) {
+                    console.error('Failed to update author on server:', err);
+                }
+            }
+        }
+
+        setEditingAuthor(null);
+        setAuthorInput('');
+    };
+
     const getCoverUrl = (cover) => {
         if (cover) {
             return URL.createObjectURL(cover);
@@ -425,6 +487,17 @@ const Library = () => {
                                             title="Set cover image"
                                         >
                                             <ImagePlus size={14} />
+                                        </button>
+                                        <button
+                                            className="book-action-btn"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                setEditingAuthor(book.id);
+                                                setAuthorInput(book.author || '');
+                                            }}
+                                            title="Set author"
+                                        >
+                                            <User size={14} />
                                         </button>
                                         <button
                                             className="book-action-btn"
@@ -538,6 +611,21 @@ const Library = () => {
                                             <Check size={14} />
                                         </div>
                                     )}
+
+                                    {/* Rename series button */}
+                                    <div className="book-actions-overlay">
+                                        <button
+                                            className="book-action-btn"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                setRenamingSeriesName(seriesName);
+                                                setRenameSeriesInput(seriesName);
+                                            }}
+                                            title="Rename series"
+                                        >
+                                            <Edit3 size={14} />
+                                        </button>
+                                    </div>
                                 </div>
 
                                 <div className="book-info">
@@ -733,6 +821,115 @@ const Library = () => {
                                     disabled={!seriesInput.trim()}
                                 >
                                     Move
+                                </button>
+                            </div>
+                        </motion.div>
+                    </>
+                )}
+            </AnimatePresence>
+
+            {/* Rename Series Modal */}
+            <AnimatePresence>
+                {renamingSeriesName && (
+                    <>
+                        <motion.div
+                            className="modal-backdrop"
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            onClick={() => { setRenamingSeriesName(null); setRenameSeriesInput(''); }}
+                        />
+                        <motion.div
+                            className="series-edit-modal"
+                            initial={{ opacity: 0, scale: 0.9 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.9 }}
+                        >
+                            <h3>Rename Series</h3>
+                            <p className="modal-subtitle">Renaming &ldquo;{renamingSeriesName}&rdquo;</p>
+                            <input
+                                type="text"
+                                value={renameSeriesInput}
+                                onChange={(e) => setRenameSeriesInput(e.target.value)}
+                                placeholder="New series name..."
+                                autoFocus
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' && renameSeriesInput.trim() && renameSeriesInput.trim() !== renamingSeriesName) {
+                                        handleRenameSeries(renamingSeriesName, renameSeriesInput.trim());
+                                    }
+                                }}
+                            />
+                            <div className="modal-actions">
+                                <button
+                                    className="btn btn-ghost"
+                                    onClick={() => { setRenamingSeriesName(null); setRenameSeriesInput(''); }}
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    className="btn btn-primary"
+                                    onClick={() => {
+                                        if (renameSeriesInput.trim() && renameSeriesInput.trim() !== renamingSeriesName) {
+                                            handleRenameSeries(renamingSeriesName, renameSeriesInput.trim());
+                                        }
+                                    }}
+                                    disabled={!renameSeriesInput.trim() || renameSeriesInput.trim() === renamingSeriesName}
+                                >
+                                    Rename
+                                </button>
+                            </div>
+                        </motion.div>
+                    </>
+                )}
+            </AnimatePresence>
+
+            {/* Author Edit Modal */}
+            <AnimatePresence>
+                {editingAuthor && (
+                    <>
+                        <motion.div
+                            className="modal-backdrop"
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            onClick={() => { setEditingAuthor(null); setAuthorInput(''); }}
+                        />
+                        <motion.div
+                            className="series-edit-modal"
+                            initial={{ opacity: 0, scale: 0.9 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.9 }}
+                        >
+                            <h3>Set Author</h3>
+                            <input
+                                type="text"
+                                value={authorInput}
+                                onChange={(e) => setAuthorInput(e.target.value)}
+                                placeholder="Author name..."
+                                autoFocus
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' && authorInput.trim()) {
+                                        handleAuthorChange(editingAuthor, authorInput.trim());
+                                    }
+                                }}
+                            />
+                            <div className="modal-actions">
+                                <button
+                                    className="btn btn-ghost"
+                                    onClick={() => { setEditingAuthor(null); setAuthorInput(''); }}
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    className="btn btn-primary"
+                                    onClick={() => {
+                                        if (authorInput.trim()) {
+                                            handleAuthorChange(editingAuthor, authorInput.trim());
+                                        }
+                                    }}
+                                    disabled={!authorInput.trim()}
+                                >
+                                    Save
                                 </button>
                             </div>
                         </motion.div>
