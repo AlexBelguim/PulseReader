@@ -191,6 +191,8 @@ const Library = () => {
                 setSyncStatus('success');
                 const updatedBooks = await getBooks();
                 setBooks(updatedBooks.reverse());
+                // Extract covers/authors in background
+                extractMissingCovers(updatedBooks);
             } else {
                 setSyncStatus('error');
             }
@@ -204,6 +206,8 @@ const Library = () => {
     const handleSyncComplete = async () => {
         const updatedBooks = await getBooks();
         setBooks(updatedBooks.reverse());
+        // Extract covers/authors in background after sync
+        extractMissingCovers(updatedBooks);
     };
 
     // Handle file import (with optional series context)
