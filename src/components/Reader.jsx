@@ -9,6 +9,8 @@ import {
     ChevronLeft,
     ChevronRight,
     Zap,
+    Maximize,
+    Minimize,
 } from 'lucide-react';
 import { getBook, updateBookProgress } from '../services/db';
 import { useReaderSettings } from '../hooks/useReaderSettings';
@@ -42,9 +44,12 @@ const Reader = () => {
     const [showTOC, setShowTOC] = useState(false);
     const [showUI, setShowUI] = useState(true);
     const [showRSVP, setShowRSVP] = useState(false);
+    const [showRSVPButton, setShowRSVPButton] = useState(false); // Hidden initially, shown after first interaction
     const [wordSelectMode, setWordSelectMode] = useState(false);
     const [rsvpStartWord, setRsvpStartWord] = useState(null); // { text, node }
     const longPressTimerRef = useRef(null);
+    const [isFullscreen, setIsFullscreen] = useState(false);
+    const [hasInteracted, setHasInteracted] = useState(false); // Track if user has interacted with page
 
     // Settings hook
     const {
@@ -181,6 +186,13 @@ const Reader = () => {
                     isNavigatingRef.current = false;
                 });
 
+                // Initial location update - ensure page is shown on first display
+                rendition.on('displayed', () => {
+                    // Mark as interacted when book is first displayed
+                    setHasInteracted(true);
+                    setShowRSVPButton(true);
+                });
+
                 // Generate locations for accurate page count (runs in background)
                 // The character count per page affects pagination
                 const charsPerPage = Math.round(1024 / (settings.fontSize / 100));
@@ -188,6 +200,12 @@ const Reader = () => {
                     setTotalPages(epubBook.locations.length());
                     setLocationsReady(true);
                     prevFontSizeRef.current = settings.fontSize;
+
+                    // Update current page immediately after locations are ready
+                    if (lastLocationRef.current && epubBook.locations) {
+                        const currentLoc = epubBook.locations.locationFromCfi(lastLocationRef.current);
+                        setCurrentPage(currentLoc || 0);
+                    }
 
                     // Force a re-display to update page number after locations are ready
                     if (lastLocationRef.current && renditionRef.current) {
@@ -256,10 +274,26 @@ const Reader = () => {
         let resizeTimeout;
         const handleResize = () => {
             clearTimeout(resizeTimeout);
-            resizeTimeout = setTimeout(() => {
+            resizeTimeout = setTimeout(async () => {
                 if (renditionRef.current && lastLocationRef.current) {
                     renditionRef.current.resize('100%', '100%');
                     renditionRef.current.display(lastLocationRef.current);
+                    
+                    // Regenerate locations for new screen size to update page count
+                    if (bookRef.current) {
+                        const charsPerPage = Math.round(1024 / (settings.fontSize / 100));
+                        setLocationsReady(false);
+                        try {
+                            await bookRef.current.locations.generate(charsPerPage);
+                            setTotalPages(bookRef.current.locations.length());
+                            // Update current page based on new locations
+                            const currentLoc = bookRef.current.locations.locationFromCfi(lastLocationRef.current);
+                            setCurrentPage(currentLoc || 0);
+                            setLocationsReady(true);
+                        } catch (err) {
+                            console.log('Error regenerating locations on resize:', err);
+                        }
+                    }
                 }
             }, 300); // Debounce to avoid rapid re-renders during fold animation
         };
@@ -544,6 +578,33 @@ const Reader = () => {
         }
     }, []);
 
+    // Fullscreen functionality
+    const toggleFullscreen = useCallback(() => {
+        if (!document.fullscreenElement) {
+            document.documentElement.requestFullscreen().then(() => {
+                setIsFullscreen(true);
+            }).catch(err => {
+                console.log('Fullscreen error:', err);
+            });
+        } else {
+            document.exitFullscreen().then(() => {
+                setIsFullscreen(false);
+            }).catch(err => {
+                console.log('Exit fullscreen error:', err);
+            });
+        }
+    }, []);
+
+    // Listen for fullscreen changes (e.g., user pressing Escape)
+    useEffect(() => {
+        const handleFullscreenChange = () => {
+            setIsFullscreen(!!document.fullscreenElement);
+        };
+
+        document.addEventListener('fullscreenchange', handleFullscreenChange);
+        return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    }, []);
+
     // Keyboard navigation
     useEffect(() => {
         const handleKeyDown = (e) => {
@@ -572,6 +633,12 @@ const Reader = () => {
 
     // Handle tap on viewer to toggle UI
     const handleViewerClick = useCallback((e) => {
+        // Mark as interacted
+        if (!hasInteracted) {
+            setHasInteracted(true);
+            setShowRSVPButton(true);
+        }
+
         // Don't handle if clicking on a button, interactive element, or RSVP FAB
         if (e.target.closest('button') ||
             e.target.closest('input') ||
@@ -585,17 +652,37 @@ const Reader = () => {
         if (!rect) return;
 
         const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
         const width = rect.width;
+        const height = rect.height;
 
-        // Tap left 25% = prev, right 25% = next, center = toggle UI
-        if (x < width * 0.25) {
-            goPrev();
-        } else if (x > width * 0.75) {
-            goNext();
+        // Check if mobile (narrow screen)
+        const isMobile = width < 768;
+
+        if (isMobile) {
+            // Mobile: tap upper 30% = toggle UI, left 30% = prev, right 30% = next
+            if (y < height * 0.3) {
+                // Upper part - toggle UI
+                setShowUI((prev) => !prev);
+            } else if (x < width * 0.3) {
+                // Left side - previous page
+                goPrev();
+            } else if (x > width * 0.7) {
+                // Right side - next page
+                goNext();
+            }
+            // Middle area does nothing (reading area)
         } else {
-            setShowUI((prev) => !prev);
+            // Desktop: original behavior - left 25% = prev, right 25% = next, center = toggle UI
+            if (x < width * 0.25) {
+                goPrev();
+            } else if (x > width * 0.75) {
+                goNext();
+            } else {
+                setShowUI((prev) => !prev);
+            }
         }
-    }, [goNext, goPrev]);
+    }, [goNext, goPrev, hasInteracted]);
 
     // Prevent button clicks from bubbling to viewer
     const handleButtonClick = useCallback((e, action) => {
@@ -667,6 +754,13 @@ const Reader = () => {
                             </button>
                             <button
                                 className="header-btn"
+                                onClick={(e) => handleButtonClick(e, toggleFullscreen)}
+                                title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+                            >
+                                {isFullscreen ? <Minimize size={24} /> : <Maximize size={24} />}
+                            </button>
+                            <button
+                                className="header-btn"
                                 onClick={(e) => handleButtonClick(e, () => setShowSettings(true))}
                                 title="Settings"
                             >
@@ -703,9 +797,9 @@ const Reader = () => {
                 )}
             </AnimatePresence>
 
-            {/* RSVP FAB Button */}
+            {/* RSVP FAB Button - only shows after first interaction */}
             <AnimatePresence>
-                {showUI && (
+                {showRSVPButton && showUI && (
                     <motion.button
                         className={`rsvp-fab ${wordSelectMode ? 'rsvp-fab-active' : ''}`}
                         initial={{ scale: 0, opacity: 0 }}
