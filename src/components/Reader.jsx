@@ -44,14 +44,13 @@ const Reader = () => {
     const [showTOC, setShowTOC] = useState(false);
     const [showUI, setShowUI] = useState(true);
     const [showRSVP, setShowRSVP] = useState(false);
-    const [showRSVPButton, setShowRSVPButton] = useState(false); // Hidden initially, shown after first interaction
     const [wordSelectMode, setWordSelectMode] = useState(false);
     const [rsvpStartWord, setRsvpStartWord] = useState(null); // { text, node }
     const longPressTimerRef = useRef(null);
     const [isFullscreen, setIsFullscreen] = useState(false);
-    const [hasInteracted, setHasInteracted] = useState(false); // Track if user has interacted with page
     const handleTapZoneRef = useRef(null); // Will be set when handleTapZone is created
     const wordSelectModeRef = useRef(false);
+    const uiAutoHideTimerRef = useRef(null); // Auto-hide UI after initial display
 
     // Settings hook
     const {
@@ -204,14 +203,53 @@ const Reader = () => {
                     handleTapZoneRef.current(viewportX, viewportY);
                 });
 
-                // Generate locations for accurate page count (runs in background)
-                // Factor in screen size and font size for more accurate page count
-                // Smaller screens = fewer chars per page = more total pages
+                // Display book FIRST - resume from last position if available
+                // Priority: savedCfi (from mode switch) > book.lastRead (from DB)
+                const startLocation = savedCfi || book.lastRead;
+                if (startLocation) {
+                    await rendition.display(startLocation);
+
+                    // Flash the resumed position after content is rendered
+                    // Use a one-time relocated handler to ensure content is ready
+                    const flashOnce = () => {
+                        rendition.off('relocated', flashOnce);
+                        setTimeout(() => {
+                            try {
+                                const contents = renditionRef.current?.getContents();
+                                if (contents && contents.length > 0) {
+                                    const range = contents[0].range(startLocation);
+                                    if (range) {
+                                        const el = range.startContainer.nodeType === Node.ELEMENT_NODE
+                                            ? range.startContainer
+                                            : range.startContainer.parentElement;
+                                        if (el) {
+                                            el.style.transition = 'background-color 0.5s ease, box-shadow 0.5s ease';
+                                            el.style.backgroundColor = 'rgba(255, 75, 75, 0.25)';
+                                            el.style.boxShadow = '0 0 8px rgba(255, 75, 75, 0.4)';
+                                            el.style.borderRadius = '4px';
+                                            setTimeout(() => {
+                                                el.style.backgroundColor = '';
+                                                el.style.boxShadow = '';
+                                                el.style.borderRadius = '';
+                                            }, 3000);
+                                        }
+                                    }
+                                }
+                            } catch (err) {
+                                // Silently fail - flash is just a visual hint
+                            }
+                        }, 200);
+                    };
+                    rendition.on('relocated', flashOnce);
+                } else {
+                    await rendition.display();
+                }
+
+                // Generate locations for accurate page count AFTER initial display
+                // This runs in the background and won't interfere with the displayed content
                 const viewerWidth = viewerRef.current?.clientWidth || window.innerWidth;
                 const viewerHeight = viewerRef.current?.clientHeight || window.innerHeight;
                 const screenArea = viewerWidth * viewerHeight;
-                // Base: ~1024 chars for a ~1000x800 screen at 100% font size
-                // Scale proportionally to screen area and font size
                 const baseArea = 1000 * 800;
                 const areaRatio = screenArea / baseArea;
                 const fontRatio = settings.fontSize / 100;
@@ -221,60 +259,17 @@ const Reader = () => {
                     setLocationsReady(true);
                     prevFontSizeRef.current = settings.fontSize;
 
-                    // Update current page immediately after locations are ready
+                    // Update current page number based on where we are
                     if (lastLocationRef.current && epubBook.locations) {
                         const currentLoc = epubBook.locations.locationFromCfi(lastLocationRef.current);
                         setCurrentPage(currentLoc || 0);
                     }
-
-                    // Force a re-display to update page number after locations are ready
-                    if (lastLocationRef.current && renditionRef.current) {
-                        renditionRef.current.display(lastLocationRef.current);
-                    }
                 });
 
-                // Display book - resume from last position if available
-                // Priority: savedCfi (from mode switch) > book.lastRead (from DB)
-                const startLocation = savedCfi || book.lastRead;
-                if (startLocation) {
-                    await rendition.display(startLocation);
-                    // Force another display to ensure correct page is shown
-                    setTimeout(() => {
-                        if (renditionRef.current && startLocation) {
-                            renditionRef.current.display(startLocation);
-                        }
-                    }, 100);
-
-                    // Flash the resumed position to show user where they left off
-                    setTimeout(() => {
-                        try {
-                            const contents = renditionRef.current?.getContents();
-                            if (contents && contents.length > 0) {
-                                const range = contents[0].range(startLocation);
-                                if (range) {
-                                    const el = range.startContainer.nodeType === Node.ELEMENT_NODE
-                                        ? range.startContainer
-                                        : range.startContainer.parentElement;
-                                    if (el) {
-                                        el.style.transition = 'background-color 0.5s ease, box-shadow 0.5s ease';
-                                        el.style.backgroundColor = 'rgba(255, 75, 75, 0.25)';
-                                        el.style.boxShadow = '0 0 8px rgba(255, 75, 75, 0.4)';
-                                        el.style.borderRadius = '4px';
-                                        setTimeout(() => {
-                                            el.style.backgroundColor = '';
-                                            el.style.boxShadow = '';
-                                            el.style.borderRadius = '';
-                                        }, 3000);
-                                    }
-                                }
-                            }
-                        } catch (err) {
-                            // Silently fail - flash is just a visual hint
-                        }
-                    }, 500);
-                } else {
-                    await rendition.display();
-                }
+                // Auto-hide UI after 3 seconds for immersive reading
+                uiAutoHideTimerRef.current = setTimeout(() => {
+                    setShowUI(false);
+                }, 3000);
 
                 // Update prev settings ref
                 prevSettingsRef.current = {
@@ -329,6 +324,9 @@ const Reader = () => {
         return () => {
             window.removeEventListener('resize', handleResize);
             clearTimeout(resizeTimeout);
+            if (uiAutoHideTimerRef.current) {
+                clearTimeout(uiAutoHideTimerRef.current);
+            }
             if (renditionRef.current) {
                 renditionRef.current.destroy();
             }
@@ -664,11 +662,12 @@ const Reader = () => {
     }, [goNext, goPrev, navigate, showSettings, showTOC]);
 
     // Core tap zone handler - used by both outer div clicks and iframe clicks
+    // Kindle-style: tap left = prev, tap right = next, tap center = toggle UI
     const handleTapZone = useCallback((clientX, clientY) => {
-        // Show RSVP button on first interaction
-        if (!hasInteracted) {
-            setHasInteracted(true);
-            setShowRSVPButton(true);
+        // Cancel any auto-hide timer on interaction
+        if (uiAutoHideTimerRef.current) {
+            clearTimeout(uiAutoHideTimerRef.current);
+            uiAutoHideTimerRef.current = null;
         }
 
         const rect = viewerRef.current?.getBoundingClientRect();
@@ -676,26 +675,19 @@ const Reader = () => {
 
         // clientX/clientY are relative to the viewport
         const x = clientX - rect.left;
-        const y = clientY - rect.top;
         const width = rect.width;
-        const height = rect.height;
 
         // Check if mobile (narrow screen)
         const isMobile = window.innerWidth < 768;
 
         if (isMobile) {
-            // Mobile Kindle-style: tap upper 20% = toggle UI, left 30% = prev, right 30% = next
-            if (y < height * 0.2) {
-                // Upper part - toggle UI
-                setShowUI((prev) => !prev);
-            } else if (x < width * 0.3) {
-                // Left side - previous page
+            // Mobile Kindle-style: left 30% = prev, right 30% = next, center 40% = toggle UI
+            if (x < width * 0.3) {
                 goPrev();
             } else if (x > width * 0.7) {
-                // Right side - next page
                 goNext();
             } else {
-                // Center tap on mobile also toggles UI (Kindle-style)
+                // Center tap toggles UI (header, footer, FAB)
                 setShowUI((prev) => !prev);
             }
         } else {
@@ -708,7 +700,7 @@ const Reader = () => {
                 setShowUI((prev) => !prev);
             }
         }
-    }, [goNext, goPrev, hasInteracted]);
+    }, [goNext, goPrev]);
 
     // Handle tap on viewer outer div (padding area around iframe)
     const handleViewerClick = useCallback((e) => {
@@ -841,9 +833,9 @@ const Reader = () => {
                 )}
             </AnimatePresence>
 
-            {/* RSVP FAB Button - only shows after first interaction */}
+            {/* RSVP FAB Button - toggles with UI */}
             <AnimatePresence>
-                {showRSVPButton && showUI && (
+                {showUI && !showRSVP && (
                     <motion.button
                         className={`rsvp-fab ${wordSelectMode ? 'rsvp-fab-active' : ''}`}
                         initial={{ scale: 0, opacity: 0 }}

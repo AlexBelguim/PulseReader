@@ -57,7 +57,6 @@ const RSVPOverlay = ({
     const wordElementsRef = useRef([]);
     const lastWordBeforeImageRef = useRef(null);
     const imageStopPointsRef = useRef([]); // Array of { wordIndex, src }
-    const useStartCfiRef = useRef(true); // Only use startCfi on initial open, not on page nav
     const currentCfiRef = useRef(null); // Track current CFI for page navigation
     const textNodesRef = useRef([]); // Track text nodes for CFI generation
 
@@ -111,7 +110,79 @@ const RSVPOverlay = ({
         return Math.round(base * multiplier);
     }, [getBaseInterval, sentenceEndMultiplier, clauseMultiplier, dashMultiplier, nameMultiplier, longWordMultiplier]);
 
-    // Extract text from current rendition page
+    // Determine the visible range of the current page using rendition.currentLocation()
+    const getVisibleRange = useCallback(() => {
+        if (!rendition) return null;
+        try {
+            const location = rendition.currentLocation();
+            if (!location) return null;
+            
+            const contents = rendition.getContents();
+            if (!contents || contents.length === 0) return null;
+            
+            const content = contents[0];
+            
+            // Get the start and end CFIs of the visible page
+            const startCfiPage = location.start?.cfi;
+            const endCfiPage = location.end?.cfi;
+            
+            if (!startCfiPage || !endCfiPage) return null;
+            
+            let startRange = null;
+            let endRange = null;
+            
+            try {
+                startRange = content.range(startCfiPage);
+            } catch (e) {
+                // Fallback: use body start
+            }
+            try {
+                endRange = content.range(endCfiPage);
+            } catch (e) {
+                // Fallback: use body end
+            }
+            
+            return { startRange, endRange, content, startCfiPage, endCfiPage };
+        } catch (err) {
+            console.log('Could not determine visible range:', err);
+            return null;
+        }
+    }, [rendition]);
+
+    // Check if a node is within the visible range
+    const isNodeInVisibleRange = useCallback((node, visibleRange) => {
+        if (!visibleRange || !node) return true; // If we can't determine, include everything
+        
+        const { startRange, endRange } = visibleRange;
+        
+        try {
+            // Check if node comes after the start of visible range
+            if (startRange) {
+                const startNode = startRange.startContainer;
+                const pos = startNode.compareDocumentPosition(node);
+                // If node is before the start of visible range, exclude it
+                if (pos & Node.DOCUMENT_POSITION_PRECEDING) {
+                    return false;
+                }
+            }
+            
+            // Check if node comes before the end of visible range
+            if (endRange) {
+                const endNode = endRange.endContainer;
+                const pos = endNode.compareDocumentPosition(node);
+                // If node is after the end of visible range, exclude it
+                if (pos & Node.DOCUMENT_POSITION_FOLLOWING) {
+                    return false;
+                }
+            }
+            
+            return true;
+        } catch (e) {
+            return true; // If comparison fails, include the node
+        }
+    }, []);
+
+    // Extract text from current rendition page (only visible content)
     const extractText = useCallback(async () => {
         if (!rendition) {
             setError('No rendition available');
@@ -134,6 +205,9 @@ const RSVPOverlay = ({
                 setExtracting(false);
                 return;
             }
+
+            // Get visible range to filter content to current page only
+            const visibleRange = getVisibleRange();
 
             const extractedWords = [];
             const elements = [];
@@ -168,12 +242,32 @@ const RSVPOverlay = ({
 
                 let node;
                 let textWordCount = 0;
+                // Track whether we've entered the visible range
+                let passedVisibleStart = !visibleRange; // If no range info, include everything
+                let passedVisibleEnd = false;
+                
                 while ((node = walker.nextNode())) {
+                    // Check visibility - only include nodes within the visible page
+                    if (visibleRange && !passedVisibleEnd) {
+                        const nodeToCheck = node.nodeType === Node.TEXT_NODE ? node.parentElement || node : node;
+                        const inRange = isNodeInVisibleRange(nodeToCheck, visibleRange);
+                        
+                        if (!passedVisibleStart) {
+                            if (inRange) {
+                                passedVisibleStart = true;
+                            } else {
+                                continue; // Skip nodes before visible range
+                            }
+                        }
+                        
+                        if (passedVisibleStart && !inRange) {
+                            passedVisibleEnd = true;
+                            break; // Stop at end of visible range
+                        }
+                    }
+                    
                     if (node.nodeType === Node.ELEMENT_NODE) {
                         // Skip decorative images that appear before any meaningful text
-                        // (e.g., chapter header icons, logos, ornamental dividers)
-                        // Only treat images as stop points if they appear after
-                        // a substantial amount of text (at least 20 words)
                         if (textWordCount < 20) {
                             continue;
                         }
@@ -184,7 +278,6 @@ const RSVPOverlay = ({
                         if (tag === 'img') {
                             imgSrc = node.src || node.getAttribute('src');
                         } else if (tag === 'svg') {
-                            // For SVGs, serialize to a data URL
                             try {
                                 const svgData = new XMLSerializer().serializeToString(node);
                                 imgSrc = 'data:image/svg+xml;base64,' + btoa(svgData);
@@ -277,70 +370,11 @@ const RSVPOverlay = ({
                     }
                 }
             }
-            // Priority 2: Use CFI to find visible page start position
-            else if (useStartCfiRef.current && startCfi && contents.length > 0) {
-                try {
-                    const content = contents[0];
-                    const range = content.range(startCfi);
-                    if (range) {
-                        const startNode = range.startContainer;
-                        const startOffset = range.startOffset;
-                        
-                        // Find the first word that belongs to or comes after the CFI start node
-                        for (let i = 0; i < displayTextNodes.length; i++) {
-                            const tn = displayTextNodes[i];
-                            if (!tn) continue;
-                            
-                            // Check if this text node is the same as the range start
-                            if (tn === startNode) {
-                                // Find the word at or after the offset
-                                const nodeText = tn.textContent || '';
-                                const wordsInNode = nodeText.split(/\s+/).filter(w => w.length > 0);
-                                let charCount = 0;
-                                for (let j = 0; j < wordsInNode.length; j++) {
-                                    const wordStart = nodeText.indexOf(wordsInNode[j], charCount);
-                                    if (wordStart >= startOffset || charCount >= startOffset) {
-                                        // Found the word - now find its index in displayWords
-                                        // Count how many words came before this node
-                                        let wordCount = 0;
-                                        for (let k = 0; k < i; k++) {
-                                            if (displayTextNodes[k]) {
-                                                const prevText = displayTextNodes[k].textContent || '';
-                                                wordCount += prevText.split(/\s+/).filter(w => w.length > 0).length;
-                                            }
-                                        }
-                                        startIdx = wordCount + j;
-                                        break;
-                                    }
-                                    charCount = wordStart + wordsInNode[j].length;
-                                }
-                                break;
-                            }
-                            // Check if this text node comes after the range start
-                            if (startNode.compareDocumentPosition &&
-                                (startNode.compareDocumentPosition(tn) & Node.DOCUMENT_POSITION_FOLLOWING)) {
-                                // This node comes after the start - use this as starting point
-                                // Count words up to this point
-                                let wordCount = 0;
-                                for (let k = 0; k < i; k++) {
-                                    if (displayTextNodes[k]) {
-                                        const prevText = displayTextNodes[k].textContent || '';
-                                        wordCount += prevText.split(/\s+/).filter(w => w.length > 0).length;
-                                    }
-                                }
-                                startIdx = wordCount;
-                                break;
-                            }
-                        }
-                    }
-                } catch (err) {
-                    console.log('Could not resolve start CFI for RSVP, starting from beginning:', err);
-                }
-            }
-            // If not using CFI (page navigation), start from beginning
-            // useStartCfiRef.current is false when navigating pages
+            // Priority 2: Since we already filtered to visible page content,
+            // start from the beginning (which IS the current page start)
+            // No need for complex CFI matching - the extraction already handles it
             
-            console.log('RSVP starting at word index:', startIdx, 'of', displayWords.length, 'words');
+            console.log('RSVP starting at word index:', startIdx, 'of', displayWords.length, 'words (visible page only)');
             setCurrentIndex(startIdx);
         } catch (err) {
             console.error('Failed to extract text:', err);
@@ -348,12 +382,11 @@ const RSVPOverlay = ({
         } finally {
             setExtracting(false);
         }
-    }, [rendition]);
+    }, [rendition, getVisibleRange, isNodeInVisibleRange]);
 
     // Extract text when overlay opens
     useEffect(() => {
         if (isOpen && rendition) {
-            useStartCfiRef.current = true; // Use CFI positioning on initial open
             extractText();
             
             // Track location changes for proper close navigation
@@ -551,13 +584,8 @@ const RSVPOverlay = ({
         setIsPlaying(false);
         setStoppedAtImage(false);
         setShowImagePreview(false);
-        useStartCfiRef.current = false; // Start from beginning of new page
         
         try {
-            // Get current location before navigation
-            const currentLoc = rendition.currentLocation();
-            console.log('Current location before next:', currentLoc);
-            
             // Call next() - it returns a promise
             const result = rendition.next();
             
@@ -566,10 +594,8 @@ const RSVPOverlay = ({
                 await result;
             }
             
-            // Wait for the new content to render, then re-extract
+            // Wait for the new content to render, then re-extract visible page
             setTimeout(() => {
-                const newLoc = rendition.currentLocation();
-                console.log('New location after next:', newLoc);
                 extractText();
             }, 300);
         } catch (err) {
@@ -592,13 +618,8 @@ const RSVPOverlay = ({
         setIsPlaying(false);
         setStoppedAtImage(false);
         setShowImagePreview(false);
-        useStartCfiRef.current = false; // Start from beginning of new page
         
         try {
-            // Get current location before navigation
-            const currentLoc = rendition.currentLocation();
-            console.log('Current location before prev:', currentLoc);
-            
             // Call prev() - it returns a promise
             const result = rendition.prev();
             
@@ -607,10 +628,8 @@ const RSVPOverlay = ({
                 await result;
             }
             
-            // Wait for the new content to render, then re-extract
+            // Wait for the new content to render, then re-extract visible page
             setTimeout(() => {
-                const newLoc = rendition.currentLocation();
-                console.log('New location after prev:', newLoc);
                 extractText();
             }, 300);
         } catch (err) {
