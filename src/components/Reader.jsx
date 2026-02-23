@@ -50,6 +50,8 @@ const Reader = () => {
     const longPressTimerRef = useRef(null);
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [hasInteracted, setHasInteracted] = useState(false); // Track if user has interacted with page
+    const handleTapZoneRef = useRef(null); // Will be set when handleTapZone is created
+    const wordSelectModeRef = useRef(false);
 
     // Settings hook
     const {
@@ -186,16 +188,34 @@ const Reader = () => {
                     isNavigatingRef.current = false;
                 });
 
-                // Initial location update - ensure page is shown on first display
-                rendition.on('displayed', () => {
-                    // Mark as interacted when book is first displayed
-                    setHasInteracted(true);
-                    setShowRSVPButton(true);
+                // Handle clicks inside the epub iframe for tap zone navigation
+                rendition.on('click', (e) => {
+                    // Don't handle if in word select mode
+                    if (wordSelectModeRef.current) return;
+
+                    // Map iframe coordinates to viewport coordinates
+                    const iframe = viewerRef.current?.querySelector('iframe');
+                    if (!iframe) return;
+
+                    const iframeRect = iframe.getBoundingClientRect();
+                    const viewportX = e.clientX + iframeRect.left;
+                    const viewportY = e.clientY + iframeRect.top;
+
+                    handleTapZoneRef.current(viewportX, viewportY);
                 });
 
                 // Generate locations for accurate page count (runs in background)
-                // The character count per page affects pagination
-                const charsPerPage = Math.round(1024 / (settings.fontSize / 100));
+                // Factor in screen size and font size for more accurate page count
+                // Smaller screens = fewer chars per page = more total pages
+                const viewerWidth = viewerRef.current?.clientWidth || window.innerWidth;
+                const viewerHeight = viewerRef.current?.clientHeight || window.innerHeight;
+                const screenArea = viewerWidth * viewerHeight;
+                // Base: ~1024 chars for a ~1000x800 screen at 100% font size
+                // Scale proportionally to screen area and font size
+                const baseArea = 1000 * 800;
+                const areaRatio = screenArea / baseArea;
+                const fontRatio = settings.fontSize / 100;
+                const charsPerPage = Math.max(100, Math.round(1024 * areaRatio / fontRatio));
                 epubBook.locations.generate(charsPerPage).then(() => {
                     setTotalPages(epubBook.locations.length());
                     setLocationsReady(true);
@@ -281,7 +301,13 @@ const Reader = () => {
                     
                     // Regenerate locations for new screen size to update page count
                     if (bookRef.current) {
-                        const charsPerPage = Math.round(1024 / (settings.fontSize / 100));
+                        const vw = viewerRef.current?.clientWidth || window.innerWidth;
+                        const vh = viewerRef.current?.clientHeight || window.innerHeight;
+                        const sa = vw * vh;
+                        const ba = 1000 * 800;
+                        const ar = sa / ba;
+                        const fr = settings.fontSize / 100;
+                        const charsPerPage = Math.max(100, Math.round(1024 * ar / fr));
                         setLocationsReady(false);
                         try {
                             await bookRef.current.locations.generate(charsPerPage);
@@ -357,7 +383,13 @@ const Reader = () => {
 
         // Regenerate locations if font size changed significantly
         if (bookRef.current && Math.abs(settings.fontSize - prevFontSizeRef.current) >= 10) {
-            const charsPerPage = Math.round(1024 / (settings.fontSize / 100));
+            const vw = viewerRef.current?.clientWidth || window.innerWidth;
+            const vh = viewerRef.current?.clientHeight || window.innerHeight;
+            const sa = vw * vh;
+            const ba = 1000 * 800;
+            const ar = sa / ba;
+            const fr = settings.fontSize / 100;
+            const charsPerPage = Math.max(100, Math.round(1024 * ar / fr));
             setLocationsReady(false);
             bookRef.current.locations.generate(charsPerPage).then(() => {
                 setTotalPages(bookRef.current.locations.length());
@@ -631,37 +663,29 @@ const Reader = () => {
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [goNext, goPrev, navigate, showSettings, showTOC]);
 
-    // Handle tap on viewer to toggle UI
-    const handleViewerClick = useCallback((e) => {
-        // Mark as interacted
+    // Core tap zone handler - used by both outer div clicks and iframe clicks
+    const handleTapZone = useCallback((clientX, clientY) => {
+        // Show RSVP button on first interaction
         if (!hasInteracted) {
             setHasInteracted(true);
             setShowRSVPButton(true);
         }
 
-        // Don't handle if clicking on a button, interactive element, or RSVP FAB
-        if (e.target.closest('button') ||
-            e.target.closest('input') ||
-            e.target.closest('.rsvp-fab') ||
-            e.target.closest('.reader-footer') ||
-            e.target.closest('.reader-header')) {
-            return;
-        }
-
         const rect = viewerRef.current?.getBoundingClientRect();
         if (!rect) return;
 
-        const x = e.clientX - rect.left;
-        const y = e.clientY - rect.top;
+        // clientX/clientY are relative to the viewport
+        const x = clientX - rect.left;
+        const y = clientY - rect.top;
         const width = rect.width;
         const height = rect.height;
 
         // Check if mobile (narrow screen)
-        const isMobile = width < 768;
+        const isMobile = window.innerWidth < 768;
 
         if (isMobile) {
-            // Mobile: tap upper 30% = toggle UI, left 30% = prev, right 30% = next
-            if (y < height * 0.3) {
+            // Mobile Kindle-style: tap upper 20% = toggle UI, left 30% = prev, right 30% = next
+            if (y < height * 0.2) {
                 // Upper part - toggle UI
                 setShowUI((prev) => !prev);
             } else if (x < width * 0.3) {
@@ -670,10 +694,12 @@ const Reader = () => {
             } else if (x > width * 0.7) {
                 // Right side - next page
                 goNext();
+            } else {
+                // Center tap on mobile also toggles UI (Kindle-style)
+                setShowUI((prev) => !prev);
             }
-            // Middle area does nothing (reading area)
         } else {
-            // Desktop: original behavior - left 25% = prev, right 25% = next, center = toggle UI
+            // Desktop: left 25% = prev, right 25% = next, center = toggle UI
             if (x < width * 0.25) {
                 goPrev();
             } else if (x > width * 0.75) {
@@ -683,6 +709,24 @@ const Reader = () => {
             }
         }
     }, [goNext, goPrev, hasInteracted]);
+
+    // Handle tap on viewer outer div (padding area around iframe)
+    const handleViewerClick = useCallback((e) => {
+        // Don't handle if clicking on a button, interactive element, or RSVP FAB
+        if (e.target.closest('button') ||
+            e.target.closest('input') ||
+            e.target.closest('.rsvp-fab') ||
+            e.target.closest('.reader-footer') ||
+            e.target.closest('.reader-header')) {
+            return;
+        }
+
+        handleTapZone(e.clientX, e.clientY);
+    }, [handleTapZone]);
+
+    // Keep refs in sync with latest values for use inside epub iframe click handler
+    handleTapZoneRef.current = handleTapZone;
+    wordSelectModeRef.current = wordSelectMode;
 
     // Prevent button clicks from bubbling to viewer
     const handleButtonClick = useCallback((e, action) => {
