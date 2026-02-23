@@ -14,7 +14,7 @@ export function syncRouter(db, booksDir) {
             const books = db.prepare(`
                 SELECT b.id, b.title, b.author, b.series, b.filename, b.filepath,
                        b.file_hash, b.file_size, b.cover_path, b.added_at, b.updated_at,
-                       rp.location as last_read, rp.progress, rp.updated_at as progress_updated_at
+                       rp.location as last_read, rp.progress, rp.is_read, rp.updated_at as progress_updated_at
                 FROM books b
                 LEFT JOIN reading_progress rp ON b.id = rp.book_id
                 ORDER BY b.series, b.title
@@ -46,7 +46,7 @@ export function syncRouter(db, booksDir) {
     /**
      * POST /api/sync/progress
      * Batch update reading progress from client.
-     * Body: { progress: [{ book_id, location, progress, updated_at }] }
+     * Body: { progress: [{ book_id, location, progress, is_read, updated_at }] }
      * 
      * Uses last-write-wins conflict resolution based on updated_at timestamps.
      */
@@ -57,10 +57,10 @@ export function syncRouter(db, booksDir) {
                 return res.status(400).json({ error: 'Expected progress array' });
             }
 
-            // Highest-progress-wins: only update if incoming progress is higher
+            // Highest-progress-wins for progress, is_read is synced separately
             const upsert = db.prepare(`
-                INSERT INTO reading_progress (book_id, location, progress, updated_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO reading_progress (book_id, location, progress, is_read, updated_at)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(book_id) DO UPDATE SET
                     location = CASE 
                         WHEN excluded.progress > reading_progress.progress THEN excluded.location
@@ -69,6 +69,10 @@ export function syncRouter(db, booksDir) {
                     progress = CASE
                         WHEN excluded.progress > reading_progress.progress THEN excluded.progress
                         ELSE reading_progress.progress
+                    END,
+                    is_read = CASE
+                        WHEN excluded.is_read IS NOT NULL THEN excluded.is_read
+                        ELSE reading_progress.is_read
                     END,
                     updated_at = CASE
                         WHEN excluded.progress > reading_progress.progress THEN excluded.updated_at
@@ -82,6 +86,7 @@ export function syncRouter(db, booksDir) {
                         update.book_id,
                         update.location,
                         update.progress,
+                        update.is_read ? 1 : 0,
                         update.updated_at || new Date().toISOString()
                     );
                 }

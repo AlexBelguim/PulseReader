@@ -311,6 +311,11 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
                 updates.series = serverBook.series;
             }
 
+            // Sync isRead from server if server has it marked as read
+            if (serverBook.is_read && !localBook.isRead) {
+                updates.isRead = true;
+            }
+
             if (!localBook.cover && serverBook.cover_path) {
                 try {
                     const cover = await downloadCover(serverBook.id);
@@ -356,6 +361,7 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
                     data: epubData,
                     progress: serverBook.progress || 0,
                     lastRead: serverBook.last_read || null,
+                    isRead: serverBook.is_read === 1,
                     syncId: serverBook.id,
                 });
 
@@ -404,11 +410,12 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
         // --- Step 4: Sync reading progress ---
         const progressUpdates = [];
         for (const { localBook, serverBook } of matchedPairs) {
-            if (localBook.progress > 0) {
+            if (localBook.progress > 0 || localBook.isRead) {
                 progressUpdates.push({
                     book_id: serverBook.id,
                     location: localBook.lastRead,
                     progress: localBook.progress,
+                    is_read: localBook.isRead || false,
                     updated_at: new Date().toISOString(),
                 });
             }
@@ -422,8 +429,15 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
                     const matched = matchedPairs.find((p) => p.serverBook.id === serverProgress.book_id);
                     if (!matched) continue;
 
+                    // Update local progress if server has higher progress
                     if (serverProgress.progress > matched.localBook.progress) {
                         await updateProgressFn(matched.localBook.id, serverProgress.location, serverProgress.progress);
+                        results.progressSynced++;
+                    }
+                    
+                    // Update local isRead if server has it marked as read
+                    if (serverProgress.is_read && !matched.localBook.isRead) {
+                        await updateBookFn(matched.localBook.id, { isRead: true });
                         results.progressSynced++;
                     }
                 }
