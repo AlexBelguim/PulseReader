@@ -58,6 +58,8 @@ const RSVPOverlay = ({
     const lastWordBeforeImageRef = useRef(null);
     const imageStopPointsRef = useRef([]); // Array of { wordIndex, src }
     const useStartCfiRef = useRef(true); // Only use startCfi on initial open, not on page nav
+    const currentCfiRef = useRef(null); // Track current CFI for page navigation
+    const textNodesRef = useRef([]); // Track text nodes for CFI generation
 
     // Calculate base interval from WPM
     const getBaseInterval = useCallback(() => {
@@ -242,6 +244,7 @@ const RSVPOverlay = ({
 
             wordsRef.current = displayWords;
             wordElementsRef.current = displayElements;
+            textNodesRef.current = displayTextNodes;
             setWords(displayWords);
 
             // Determine starting word index
@@ -281,16 +284,51 @@ const RSVPOverlay = ({
                     const range = content.range(startCfi);
                     if (range) {
                         const startNode = range.startContainer;
+                        const startOffset = range.startOffset;
+                        
                         // Find the first word that belongs to or comes after the CFI start node
                         for (let i = 0; i < displayTextNodes.length; i++) {
                             const tn = displayTextNodes[i];
                             if (!tn) continue;
-                            // Check if this text node is the same as or comes after the range start
-                            if (tn === startNode || tn.parentElement === startNode ||
-                                (startNode.compareDocumentPosition &&
-                                 (startNode.compareDocumentPosition(tn) & Node.DOCUMENT_POSITION_FOLLOWING) ||
-                                 startNode === tn)) {
-                                startIdx = i;
+                            
+                            // Check if this text node is the same as the range start
+                            if (tn === startNode) {
+                                // Find the word at or after the offset
+                                const nodeText = tn.textContent || '';
+                                const wordsInNode = nodeText.split(/\s+/).filter(w => w.length > 0);
+                                let charCount = 0;
+                                for (let j = 0; j < wordsInNode.length; j++) {
+                                    const wordStart = nodeText.indexOf(wordsInNode[j], charCount);
+                                    if (wordStart >= startOffset || charCount >= startOffset) {
+                                        // Found the word - now find its index in displayWords
+                                        // Count how many words came before this node
+                                        let wordCount = 0;
+                                        for (let k = 0; k < i; k++) {
+                                            if (displayTextNodes[k]) {
+                                                const prevText = displayTextNodes[k].textContent || '';
+                                                wordCount += prevText.split(/\s+/).filter(w => w.length > 0).length;
+                                            }
+                                        }
+                                        startIdx = wordCount + j;
+                                        break;
+                                    }
+                                    charCount = wordStart + wordsInNode[j].length;
+                                }
+                                break;
+                            }
+                            // Check if this text node comes after the range start
+                            if (startNode.compareDocumentPosition &&
+                                (startNode.compareDocumentPosition(tn) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+                                // This node comes after the start - use this as starting point
+                                // Count words up to this point
+                                let wordCount = 0;
+                                for (let k = 0; k < i; k++) {
+                                    if (displayTextNodes[k]) {
+                                        const prevText = displayTextNodes[k].textContent || '';
+                                        wordCount += prevText.split(/\s+/).filter(w => w.length > 0).length;
+                                    }
+                                }
+                                startIdx = wordCount;
                                 break;
                             }
                         }
@@ -299,6 +337,10 @@ const RSVPOverlay = ({
                     console.log('Could not resolve start CFI for RSVP, starting from beginning:', err);
                 }
             }
+            // If not using CFI (page navigation), start from beginning
+            // useStartCfiRef.current is false when navigating pages
+            
+            console.log('RSVP starting at word index:', startIdx, 'of', displayWords.length, 'words');
             setCurrentIndex(startIdx);
         } catch (err) {
             console.error('Failed to extract text:', err);
@@ -313,6 +355,21 @@ const RSVPOverlay = ({
         if (isOpen && rendition) {
             useStartCfiRef.current = true; // Use CFI positioning on initial open
             extractText();
+            
+            // Track location changes for proper close navigation
+            const handleRelocated = (location) => {
+                if (location?.start?.cfi) {
+                    currentCfiRef.current = location.start.cfi;
+                }
+            };
+            rendition.on('relocated', handleRelocated);
+            
+            return () => {
+                rendition.off('relocated', handleRelocated);
+                if (timerRef.current) {
+                    clearTimeout(timerRef.current);
+                }
+            };
         }
         return () => {
             if (timerRef.current) {
@@ -418,18 +475,50 @@ const RSVPOverlay = ({
             clearTimeout(timerRef.current);
         }
 
-        // Notify parent of current position
-        if (onCloseWithPosition && wordElementsRef.current[currentIndex]) {
+        // Generate CFI for current position if possible
+        let currentCfi = currentCfiRef.current; // Use tracked CFI as fallback
+        
+        try {
+            const contents = rendition?.getContents();
+            if (contents && contents.length > 0 && textNodesRef.current[currentIndex]) {
+                const textNode = textNodesRef.current[currentIndex];
+                const word = wordsRef.current[currentIndex];
+                if (textNode && word) {
+                    // Create a range at the start of the current word
+                    const doc = textNode.ownerDocument;
+                    const range = doc.createRange();
+                    const textContent = textNode.textContent;
+                    const wordIndex = textContent.indexOf(word);
+                    if (wordIndex >= 0) {
+                        range.setStart(textNode, wordIndex);
+                        range.setEnd(textNode, wordIndex + word.length);
+                        // Generate CFI from the range
+                        const wordCfi = contents[0].cfiFromRange(range);
+                        if (wordCfi) {
+                            currentCfi = wordCfi;
+                        }
+                    }
+                }
+            }
+        } catch (err) {
+            console.log('Could not generate CFI for current position:', err);
+        }
+
+        console.log('RSVP closing with CFI:', currentCfi);
+
+        // Notify parent of current position with CFI
+        if (onCloseWithPosition) {
             onCloseWithPosition({
                 word: words[currentIndex],
                 originalWord: wordsRef.current[currentIndex],
                 parent: wordElementsRef.current[currentIndex]?.parent,
                 index: currentIndex,
+                cfi: currentCfi,
             });
         }
 
         onClose();
-    }, [onClose, onCloseWithPosition, currentIndex, words]);
+    }, [onClose, onCloseWithPosition, currentIndex, words, rendition]);
 
     // Navigation controls
     const skipBack = useCallback(() => {
@@ -448,29 +537,82 @@ const RSVPOverlay = ({
 
     // Page navigation
     const goToNextPage = useCallback(async () => {
-        if (!rendition) return;
+        if (!rendition) {
+            console.log('No rendition available for page navigation');
+            return;
+        }
+        
+        // Check if rendition has the next method
+        if (typeof rendition.next !== 'function') {
+            console.log('Rendition does not have next method');
+            return;
+        }
+        
         setIsPlaying(false);
         setStoppedAtImage(false);
         setShowImagePreview(false);
         useStartCfiRef.current = false; // Start from beginning of new page
+        
         try {
-            await rendition.next();
-            // Wait a tick for the new content to render, then re-extract
-            setTimeout(() => extractText(), 100);
+            // Get current location before navigation
+            const currentLoc = rendition.currentLocation();
+            console.log('Current location before next:', currentLoc);
+            
+            // Call next() - it returns a promise
+            const result = rendition.next();
+            
+            // Handle both promise and non-promise returns
+            if (result && typeof result.then === 'function') {
+                await result;
+            }
+            
+            // Wait for the new content to render, then re-extract
+            setTimeout(() => {
+                const newLoc = rendition.currentLocation();
+                console.log('New location after next:', newLoc);
+                extractText();
+            }, 300);
         } catch (err) {
             console.error('Failed to go to next page:', err);
         }
     }, [rendition, extractText]);
 
     const goToPrevPage = useCallback(async () => {
-        if (!rendition) return;
+        if (!rendition) {
+            console.log('No rendition available for page navigation');
+            return;
+        }
+        
+        // Check if rendition has the prev method
+        if (typeof rendition.prev !== 'function') {
+            console.log('Rendition does not have prev method');
+            return;
+        }
+        
         setIsPlaying(false);
         setStoppedAtImage(false);
         setShowImagePreview(false);
         useStartCfiRef.current = false; // Start from beginning of new page
+        
         try {
-            await rendition.prev();
-            setTimeout(() => extractText(), 100);
+            // Get current location before navigation
+            const currentLoc = rendition.currentLocation();
+            console.log('Current location before prev:', currentLoc);
+            
+            // Call prev() - it returns a promise
+            const result = rendition.prev();
+            
+            // Handle both promise and non-promise returns
+            if (result && typeof result.then === 'function') {
+                await result;
+            }
+            
+            // Wait for the new content to render, then re-extract
+            setTimeout(() => {
+                const newLoc = rendition.currentLocation();
+                console.log('New location after prev:', newLoc);
+                extractText();
+            }, 300);
         } catch (err) {
             console.error('Failed to go to previous page:', err);
         }

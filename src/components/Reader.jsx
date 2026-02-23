@@ -467,9 +467,25 @@ const Reader = () => {
         };
     }, [wordSelectMode]);
 
-    // Handle RSVP close - highlight the last read word for 5 seconds
+    // Handle RSVP close - navigate to the last read position and highlight it
     const handleRSVPCloseWithPosition = useCallback((wordInfo) => {
-        if (!wordInfo?.parent || !renditionRef.current) return;
+        if (!renditionRef.current) return;
+
+        // If we have a CFI, navigate to it first
+        if (wordInfo?.cfi) {
+            renditionRef.current.display(wordInfo.cfi).then(() => {
+                // After navigation, highlight the word
+                highlightLastWord(wordInfo);
+            });
+        } else if (wordInfo?.parent) {
+            // Fallback: just highlight without navigation
+            highlightLastWord(wordInfo);
+        }
+    }, []);
+
+    // Helper function to highlight the last word
+    const highlightLastWord = useCallback((wordInfo) => {
+        if (!wordInfo?.parent) return;
 
         try {
             // Find the word text in the parent and wrap it with a highlight span
@@ -481,6 +497,9 @@ const Reader = () => {
             parent.style.backgroundColor = 'rgba(255, 75, 75, 0.4)';
             parent.style.boxShadow = '0 0 10px rgba(255, 75, 75, 0.6)';
             parent.style.borderRadius = '4px';
+
+            // Scroll the element into view if needed
+            parent.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
             // Remove highlight after 5 seconds
             setTimeout(() => {
