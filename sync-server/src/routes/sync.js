@@ -71,8 +71,8 @@ export function syncRouter(db, booksDir) {
                         ELSE reading_progress.progress
                     END,
                     is_read = CASE
-                        WHEN excluded.is_read IS NOT NULL THEN excluded.is_read
-                        ELSE reading_progress.is_read
+                        WHEN excluded.is_read = 1 OR reading_progress.is_read = 1 THEN 1
+                        ELSE 0
                     END,
                     updated_at = CASE
                         WHEN excluded.progress > reading_progress.progress THEN excluded.updated_at
