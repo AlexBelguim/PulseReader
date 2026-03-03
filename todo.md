@@ -8,3 +8,8 @@ also when switching form folded to unfolded on a foldable device it should updat
 also it currently doesnt show the current page before i navigate to the next or previous page. it should show the current page when i open the book.
 
 would also like a full screen mode for the book reader. and on mobile the ui in te reader should switch between hidden and shown when it tap the upper part of the screen, also page navigation should be kindle style, where you tap the left or right side of the screen to navigate to the next or previous page.
+
+
+synce not saving books manual set as read to server
+
+

@@ -59,6 +59,7 @@ const RSVPOverlay = ({
     const imageStopPointsRef = useRef([]); // Array of { wordIndex, src }
     const currentCfiRef = useRef(null); // Track current CFI for page navigation
     const textNodesRef = useRef([]); // Track text nodes for CFI generation
+    const isLoadingNextPageRef = useRef(false); // Prevent double-triggers during page advance
 
     // Calculate base interval from WPM
     const getBaseInterval = useCallback(() => {
@@ -116,21 +117,21 @@ const RSVPOverlay = ({
         try {
             const location = rendition.currentLocation();
             if (!location) return null;
-            
+
             const contents = rendition.getContents();
             if (!contents || contents.length === 0) return null;
-            
+
             const content = contents[0];
-            
+
             // Get the start and end CFIs of the visible page
             const startCfiPage = location.start?.cfi;
             const endCfiPage = location.end?.cfi;
-            
+
             if (!startCfiPage || !endCfiPage) return null;
-            
+
             let startRange = null;
             let endRange = null;
-            
+
             try {
                 startRange = content.range(startCfiPage);
             } catch (e) {
@@ -141,7 +142,7 @@ const RSVPOverlay = ({
             } catch (e) {
                 // Fallback: use body end
             }
-            
+
             return { startRange, endRange, content, startCfiPage, endCfiPage };
         } catch (err) {
             console.log('Could not determine visible range:', err);
@@ -152,9 +153,9 @@ const RSVPOverlay = ({
     // Check if a node is within the visible range
     const isNodeInVisibleRange = useCallback((node, visibleRange) => {
         if (!visibleRange || !node) return true; // If we can't determine, include everything
-        
+
         const { startRange, endRange } = visibleRange;
-        
+
         try {
             // Check if node comes after the start of visible range
             if (startRange) {
@@ -165,7 +166,7 @@ const RSVPOverlay = ({
                     return false;
                 }
             }
-            
+
             // Check if node comes before the end of visible range
             if (endRange) {
                 const endNode = endRange.endContainer;
@@ -175,7 +176,7 @@ const RSVPOverlay = ({
                     return false;
                 }
             }
-            
+
             return true;
         } catch (e) {
             return true; // If comparison fails, include the node
@@ -245,13 +246,13 @@ const RSVPOverlay = ({
                 // Track whether we've entered the visible range
                 let passedVisibleStart = !visibleRange; // If no range info, include everything
                 let passedVisibleEnd = false;
-                
+
                 while ((node = walker.nextNode())) {
                     // Check visibility - only include nodes within the visible page
                     if (visibleRange && !passedVisibleEnd) {
                         const nodeToCheck = node.nodeType === Node.TEXT_NODE ? node.parentElement || node : node;
                         const inRange = isNodeInVisibleRange(nodeToCheck, visibleRange);
-                        
+
                         if (!passedVisibleStart) {
                             if (inRange) {
                                 passedVisibleStart = true;
@@ -259,13 +260,13 @@ const RSVPOverlay = ({
                                 continue; // Skip nodes before visible range
                             }
                         }
-                        
+
                         if (passedVisibleStart && !inRange) {
                             passedVisibleEnd = true;
                             break; // Stop at end of visible range
                         }
                     }
-                    
+
                     if (node.nodeType === Node.ELEMENT_NODE) {
                         // Skip decorative images that appear before any meaningful text
                         if (textWordCount < 20) {
@@ -373,7 +374,7 @@ const RSVPOverlay = ({
             // Priority 2: Since we already filtered to visible page content,
             // start from the beginning (which IS the current page start)
             // No need for complex CFI matching - the extraction already handles it
-            
+
             console.log('RSVP starting at word index:', startIdx, 'of', displayWords.length, 'words (visible page only)');
             setCurrentIndex(startIdx);
         } catch (err) {
@@ -384,11 +385,185 @@ const RSVPOverlay = ({
         }
     }, [rendition, getVisibleRange, isNodeInVisibleRange]);
 
+    // Load next page words seamlessly (auto-advance during playback)
+    const loadNextPageWords = useCallback(async () => {
+        if (!rendition || isLoadingNextPageRef.current) return;
+        if (typeof rendition.next !== 'function') return;
+
+        isLoadingNextPageRef.current = true;
+
+        try {
+            // Remember current location to detect if we actually moved
+            const locationBefore = rendition.currentLocation();
+            const cfiBefore = locationBefore?.start?.cfi;
+
+            const result = rendition.next();
+            if (result && typeof result.then === 'function') {
+                await result;
+            }
+
+            // Wait for new content to render
+            await new Promise(resolve => setTimeout(resolve, 300));
+
+            // Check if we actually moved to a new page (end of book detection)
+            const locationAfter = rendition.currentLocation();
+            const cfiAfter = locationAfter?.start?.cfi;
+
+            if (cfiBefore && cfiAfter && cfiBefore === cfiAfter) {
+                // Didn't move — end of book
+                setIsPlaying(false);
+                isLoadingNextPageRef.current = false;
+                return;
+            }
+
+            // Re-extract text for the new visible page
+            const visibleRange = getVisibleRange();
+            const extractedWords = [];
+            const elements = [];
+            const textNodes = [];
+
+            const contents = rendition.getContents();
+            if (!contents || contents.length === 0) {
+                setIsPlaying(false);
+                isLoadingNextPageRef.current = false;
+                return;
+            }
+
+            contents.forEach((content) => {
+                const doc = content.document;
+                if (!doc || !doc.body) return;
+
+                const walker = doc.createTreeWalker(
+                    doc.body,
+                    NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+                    {
+                        acceptNode: (node) => {
+                            if (node.nodeType === Node.ELEMENT_NODE) {
+                                const tag = node.tagName?.toLowerCase();
+                                if (tag === 'img' || tag === 'image' || tag === 'svg') {
+                                    return NodeFilter.FILTER_ACCEPT;
+                                }
+                                return NodeFilter.FILTER_SKIP;
+                            }
+                            if (node.nodeType === Node.TEXT_NODE) {
+                                const text = node.textContent?.trim();
+                                if (text && text.length > 0) {
+                                    return NodeFilter.FILTER_ACCEPT;
+                                }
+                            }
+                            return NodeFilter.FILTER_SKIP;
+                        }
+                    }
+                );
+
+                let node;
+                let textWordCount = 0;
+                let passedVisibleStart = !visibleRange;
+                let passedVisibleEnd = false;
+
+                while ((node = walker.nextNode())) {
+                    if (visibleRange && !passedVisibleEnd) {
+                        const nodeToCheck = node.nodeType === Node.TEXT_NODE ? node.parentElement || node : node;
+                        const inRange = isNodeInVisibleRange(nodeToCheck, visibleRange);
+
+                        if (!passedVisibleStart) {
+                            if (inRange) passedVisibleStart = true;
+                            else continue;
+                        }
+
+                        if (passedVisibleStart && !inRange) {
+                            passedVisibleEnd = true;
+                            break;
+                        }
+                    }
+
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        if (textWordCount < 20) continue;
+
+                        let imgSrc = null;
+                        const tag = node.tagName?.toLowerCase();
+                        if (tag === 'img') {
+                            imgSrc = node.src || node.getAttribute('src');
+                        } else if (tag === 'svg') {
+                            try {
+                                const svgData = new XMLSerializer().serializeToString(node);
+                                imgSrc = 'data:image/svg+xml;base64,' + btoa(svgData);
+                            } catch (e) { /* fallback */ }
+                        } else if (tag === 'image') {
+                            imgSrc = node.href?.baseVal || node.getAttribute('href') || node.getAttribute('xlink:href');
+                        }
+
+                        extractedWords.push({ text: '__IMAGE__', isImage: true, imgSrc });
+                        elements.push({ parent: node.parentElement, isImage: true });
+                        textNodes.push(null);
+                        continue;
+                    }
+
+                    const text = node.textContent.trim();
+                    if (!text) continue;
+
+                    const nodeWords = text.split(/\s+/).filter(w => w.length > 0);
+                    textWordCount += nodeWords.length;
+                    nodeWords.forEach((w) => {
+                        extractedWords.push({ text: w, isImage: false });
+                        elements.push({ parent: node.parentElement, isImage: false });
+                        textNodes.push(node);
+                    });
+                }
+            });
+
+            // Build image stop points
+            const allImageStops = [];
+            let textCountSoFar = 0;
+            for (let i = 0; i < extractedWords.length; i++) {
+                if (extractedWords[i].isImage) {
+                    allImageStops.push({ wordIndex: textCountSoFar, src: extractedWords[i].imgSrc });
+                } else {
+                    textCountSoFar++;
+                }
+            }
+            imageStopPointsRef.current = allImageStops;
+
+            const displayWords = extractedWords.filter(w => !w.isImage).map(w => w.text);
+            const displayElements = elements.filter(e => !e.isImage);
+            const displayTextNodes = textNodes.filter((_, i) => !extractedWords[i]?.isImage);
+
+            if (allImageStops.length > 0) {
+                setImageStopIndex(allImageStops[0].wordIndex);
+            } else {
+                setImageStopIndex(-1);
+            }
+
+            if (displayWords.length === 0) {
+                // Empty page (e.g. full-page image) — try the next page
+                isLoadingNextPageRef.current = false;
+                loadNextPageWords();
+                return;
+            }
+
+            wordsRef.current = displayWords;
+            wordElementsRef.current = displayElements;
+            textNodesRef.current = displayTextNodes;
+            setWords(displayWords);
+            setCurrentIndex(0);
+            setStoppedAtImage(false);
+            setShowImagePreview(false);
+            setCurrentImageSrc(null);
+
+            console.log('RSVP auto-advanced to next page:', displayWords.length, 'words');
+        } catch (err) {
+            console.error('Failed to auto-advance page:', err);
+            setIsPlaying(false);
+        } finally {
+            isLoadingNextPageRef.current = false;
+        }
+    }, [rendition, getVisibleRange, isNodeInVisibleRange]);
+
     // Extract text when overlay opens
     useEffect(() => {
         if (isOpen && rendition) {
             extractText();
-            
+
             // Track location changes for proper close navigation
             const handleRelocated = (location) => {
                 if (location?.start?.cfi) {
@@ -396,7 +571,7 @@ const RSVPOverlay = ({
                 }
             };
             rendition.on('relocated', handleRelocated);
-            
+
             return () => {
                 rendition.off('relocated', handleRelocated);
                 if (timerRef.current) {
@@ -464,16 +639,16 @@ const RSVPOverlay = ({
                     return prev;
                 }
 
-                // Check if we've reached the end
+                // Reached end of current page — auto-advance to next
                 if (next >= wordsRef.current.length) {
-                    setIsPlaying(false);
+                    loadNextPageWords();
                     return prev;
                 }
 
                 return next;
             });
         }, delay);
-    }, [currentIndex, getWordDelay, imageStopIndex]);
+    }, [currentIndex, getWordDelay, imageStopIndex, loadNextPageWords]);
 
     // Play/pause loop
     useEffect(() => {
@@ -510,7 +685,7 @@ const RSVPOverlay = ({
 
         // Generate CFI for current position if possible
         let currentCfi = currentCfiRef.current; // Use tracked CFI as fallback
-        
+
         try {
             const contents = rendition?.getContents();
             if (contents && contents.length > 0 && textNodesRef.current[currentIndex]) {
@@ -574,26 +749,26 @@ const RSVPOverlay = ({
             console.log('No rendition available for page navigation');
             return;
         }
-        
+
         // Check if rendition has the next method
         if (typeof rendition.next !== 'function') {
             console.log('Rendition does not have next method');
             return;
         }
-        
+
         setIsPlaying(false);
         setStoppedAtImage(false);
         setShowImagePreview(false);
-        
+
         try {
             // Call next() - it returns a promise
             const result = rendition.next();
-            
+
             // Handle both promise and non-promise returns
             if (result && typeof result.then === 'function') {
                 await result;
             }
-            
+
             // Wait for the new content to render, then re-extract visible page
             setTimeout(() => {
                 extractText();
@@ -608,26 +783,26 @@ const RSVPOverlay = ({
             console.log('No rendition available for page navigation');
             return;
         }
-        
+
         // Check if rendition has the prev method
         if (typeof rendition.prev !== 'function') {
             console.log('Rendition does not have prev method');
             return;
         }
-        
+
         setIsPlaying(false);
         setStoppedAtImage(false);
         setShowImagePreview(false);
-        
+
         try {
             // Call prev() - it returns a promise
             const result = rendition.prev();
-            
+
             // Handle both promise and non-promise returns
             if (result && typeof result.then === 'function') {
                 await result;
             }
-            
+
             // Wait for the new content to render, then re-extract visible page
             setTimeout(() => {
                 extractText();
