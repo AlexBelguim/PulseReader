@@ -26,6 +26,7 @@ const Reader = () => {
     const bookRef = useRef(null);
     const isNavigatingRef = useRef(false);
     const lastLocationRef = useRef(null);
+    const locsPerPageRef = useRef(1); // Measured: how many location slots fit one visual page
 
     // State
     const [book, setBook] = useState(null);
@@ -172,11 +173,19 @@ const Reader = () => {
                         setCurrentChapter(location.start.href);
                     }
 
-                    // Get page numbers if available (1-based display)
+                    // Get page numbers based on actual visual page span
                     if (epubBook.locations && epubBook.locations.length()) {
-                        const currentLoc = epubBook.locations.locationFromCfi(location.start.cfi);
-                        setCurrentPage((currentLoc || 0) + 1);
-                        setTotalPages(epubBook.locations.length());
+                        const startLoc = epubBook.locations.locationFromCfi(location.start.cfi) || 0;
+                        const endLoc = location.end?.cfi
+                            ? (epubBook.locations.locationFromCfi(location.end.cfi) || startLoc)
+                            : startLoc;
+                        const span = Math.max(1, endLoc - startLoc);
+                        locsPerPageRef.current = span;
+                        const totalLocs = epubBook.locations.length();
+                        const totalVisualPages = Math.max(1, Math.ceil(totalLocs / span));
+                        const currentVisualPage = Math.floor(startLoc / span) + 1;
+                        setTotalPages(totalVisualPages);
+                        setCurrentPage(Math.min(currentVisualPage, totalVisualPages));
                     }
 
                     // Save progress to database
@@ -253,14 +262,18 @@ const Reader = () => {
                 // Generate locations for accurate page count AFTER initial display
                 // Use a fixed small value for fine-grained location grid
                 epubBook.locations.generate(150).then(() => {
-                    setTotalPages(epubBook.locations.length());
                     setLocationsReady(true);
                     prevLayoutFingerprintRef.current = getLayoutFingerprint();
 
-                    // Update current page number based on where we are (1-based)
-                    if (lastLocationRef.current && epubBook.locations) {
-                        const currentLoc = epubBook.locations.locationFromCfi(lastLocationRef.current);
-                        setCurrentPage((currentLoc || 0) + 1);
+                    // The next relocated event will set proper page numbers
+                    // using the self-calibrating span measurement.
+                    // For now, set an initial estimate.
+                    const totalLocs = epubBook.locations.length();
+                    const lpp = locsPerPageRef.current || 1;
+                    setTotalPages(Math.max(1, Math.ceil(totalLocs / lpp)));
+                    if (lastLocationRef.current) {
+                        const currentLoc = epubBook.locations.locationFromCfi(lastLocationRef.current) || 0;
+                        setCurrentPage(Math.floor(currentLoc / lpp) + 1);
                     }
                 });
 
@@ -299,10 +312,11 @@ const Reader = () => {
                         setCurrentPage(0);
                         try {
                             await bookRef.current.locations.generate(150);
-                            setTotalPages(bookRef.current.locations.length());
-                            // Update current page based on new locations (1-based)
-                            const currentLoc = bookRef.current.locations.locationFromCfi(lastLocationRef.current);
-                            setCurrentPage((currentLoc || 0) + 1);
+                            const totalLocs = bookRef.current.locations.length();
+                            const lpp = locsPerPageRef.current || 1;
+                            setTotalPages(Math.max(1, Math.ceil(totalLocs / lpp)));
+                            const currentLoc = bookRef.current.locations.locationFromCfi(lastLocationRef.current) || 0;
+                            setCurrentPage(Math.floor(currentLoc / lpp) + 1);
                             setLocationsReady(true);
                         } catch (err) {
                             console.log('Error regenerating locations on resize:', err);
@@ -379,13 +393,14 @@ const Reader = () => {
             setTotalPages(0);
             setCurrentPage(0);
             bookRef.current.locations.generate(150).then(() => {
-                setTotalPages(bookRef.current.locations.length());
                 setLocationsReady(true);
                 prevLayoutFingerprintRef.current = currentFingerprint;
-                // Update current page after regeneration (1-based)
+                const totalLocs = bookRef.current.locations.length();
+                const lpp = locsPerPageRef.current || 1;
+                setTotalPages(Math.max(1, Math.ceil(totalLocs / lpp)));
                 if (lastLocationRef.current && bookRef.current.locations) {
-                    const currentLoc = bookRef.current.locations.locationFromCfi(lastLocationRef.current);
-                    setCurrentPage((currentLoc || 0) + 1);
+                    const currentLoc = bookRef.current.locations.locationFromCfi(lastLocationRef.current) || 0;
+                    setCurrentPage(Math.floor(currentLoc / lpp) + 1);
                 }
             });
         }
