@@ -67,8 +67,11 @@ const Reader = () => {
         twoPageLayout: settings.twoPageLayout,
     });
 
-    // Track font size for page count regeneration
-    const prevFontSizeRef = useRef(settings.fontSize);
+    // Track layout-affecting settings for page count regeneration
+    const getLayoutFingerprint = useCallback(() => {
+        return `${settings.fontSize}-${settings.lineSpacing}-${settings.fontWeight}-${settings.fontType}-${settings.pageMargins}-${settings.textAlignment}`;
+    }, [settings.fontSize, settings.lineSpacing, settings.fontWeight, settings.fontType, settings.pageMargins, settings.textAlignment]);
+    const prevLayoutFingerprintRef = useRef(getLayoutFingerprint());
 
     // Load book from IndexedDB
     useEffect(() => {
@@ -112,6 +115,8 @@ const Reader = () => {
                 }
 
                 setLocationsReady(false);
+                setTotalPages(0);
+                setCurrentPage(0);
 
                 // Create new book instance
                 const epubBook = ePub(book.data);
@@ -167,10 +172,10 @@ const Reader = () => {
                         setCurrentChapter(location.start.href);
                     }
 
-                    // Get page numbers if available
+                    // Get page numbers if available (1-based display)
                     if (epubBook.locations && epubBook.locations.length()) {
                         const currentLoc = epubBook.locations.locationFromCfi(location.start.cfi);
-                        setCurrentPage(currentLoc || 0);
+                        setCurrentPage((currentLoc || 0) + 1);
                         setTotalPages(epubBook.locations.length());
                     }
 
@@ -246,23 +251,16 @@ const Reader = () => {
                 }
 
                 // Generate locations for accurate page count AFTER initial display
-                // This runs in the background and won't interfere with the displayed content
-                const viewerWidth = viewerRef.current?.clientWidth || window.innerWidth;
-                const viewerHeight = viewerRef.current?.clientHeight || window.innerHeight;
-                const screenArea = viewerWidth * viewerHeight;
-                const baseArea = 1000 * 800;
-                const areaRatio = screenArea / baseArea;
-                const fontRatio = settings.fontSize / 100;
-                const charsPerPage = Math.max(100, Math.round(1024 * areaRatio / fontRatio));
-                epubBook.locations.generate(charsPerPage).then(() => {
+                // Use a fixed small value for fine-grained location grid
+                epubBook.locations.generate(150).then(() => {
                     setTotalPages(epubBook.locations.length());
                     setLocationsReady(true);
-                    prevFontSizeRef.current = settings.fontSize;
+                    prevLayoutFingerprintRef.current = getLayoutFingerprint();
 
-                    // Update current page number based on where we are
+                    // Update current page number based on where we are (1-based)
                     if (lastLocationRef.current && epubBook.locations) {
                         const currentLoc = epubBook.locations.locationFromCfi(lastLocationRef.current);
-                        setCurrentPage(currentLoc || 0);
+                        setCurrentPage((currentLoc || 0) + 1);
                     }
                 });
 
@@ -293,23 +291,18 @@ const Reader = () => {
                 if (renditionRef.current && lastLocationRef.current) {
                     renditionRef.current.resize('100%', '100%');
                     renditionRef.current.display(lastLocationRef.current);
-                    
+
                     // Regenerate locations for new screen size to update page count
                     if (bookRef.current) {
-                        const vw = viewerRef.current?.clientWidth || window.innerWidth;
-                        const vh = viewerRef.current?.clientHeight || window.innerHeight;
-                        const sa = vw * vh;
-                        const ba = 1000 * 800;
-                        const ar = sa / ba;
-                        const fr = settings.fontSize / 100;
-                        const charsPerPage = Math.max(100, Math.round(1024 * ar / fr));
                         setLocationsReady(false);
+                        setTotalPages(0);
+                        setCurrentPage(0);
                         try {
-                            await bookRef.current.locations.generate(charsPerPage);
+                            await bookRef.current.locations.generate(150);
                             setTotalPages(bookRef.current.locations.length());
-                            // Update current page based on new locations
+                            // Update current page based on new locations (1-based)
                             const currentLoc = bookRef.current.locations.locationFromCfi(lastLocationRef.current);
-                            setCurrentPage(currentLoc || 0);
+                            setCurrentPage((currentLoc || 0) + 1);
                             setLocationsReady(true);
                         } catch (err) {
                             console.log('Error regenerating locations on resize:', err);
@@ -379,24 +372,25 @@ const Reader = () => {
             }
         });
 
-        // Regenerate locations if font size changed significantly
-        if (bookRef.current && Math.abs(settings.fontSize - prevFontSizeRef.current) >= 10) {
-            const vw = viewerRef.current?.clientWidth || window.innerWidth;
-            const vh = viewerRef.current?.clientHeight || window.innerHeight;
-            const sa = vw * vh;
-            const ba = 1000 * 800;
-            const ar = sa / ba;
-            const fr = settings.fontSize / 100;
-            const charsPerPage = Math.max(100, Math.round(1024 * ar / fr));
+        // Regenerate locations if any layout-affecting setting changed
+        const currentFingerprint = getLayoutFingerprint();
+        if (bookRef.current && currentFingerprint !== prevLayoutFingerprintRef.current) {
             setLocationsReady(false);
-            bookRef.current.locations.generate(charsPerPage).then(() => {
+            setTotalPages(0);
+            setCurrentPage(0);
+            bookRef.current.locations.generate(150).then(() => {
                 setTotalPages(bookRef.current.locations.length());
                 setLocationsReady(true);
-                prevFontSizeRef.current = settings.fontSize;
+                prevLayoutFingerprintRef.current = currentFingerprint;
+                // Update current page after regeneration (1-based)
+                if (lastLocationRef.current && bookRef.current.locations) {
+                    const currentLoc = bookRef.current.locations.locationFromCfi(lastLocationRef.current);
+                    setCurrentPage((currentLoc || 0) + 1);
+                }
             });
         }
 
-    }, [settings, getEpubStyles, themeColors]);
+    }, [settings, getEpubStyles, themeColors, getLayoutFingerprint]);
 
     // Navigation functions with debouncing
     const goNext = useCallback(() => {
@@ -884,9 +878,11 @@ const Reader = () => {
                                 onClick={(e) => e.stopPropagation()}
                             />
                             <span className="progress-text">
-                                {totalPages > 0
-                                    ? `${currentPage} van ${totalPages}`
-                                    : `${Math.round(progress * 100)}%`
+                                {!locationsReady
+                                    ? 'Calculating...'
+                                    : totalPages > 0
+                                        ? `${currentPage} van ${totalPages}`
+                                        : `${Math.round(progress * 100)}%`
                                 }
                             </span>
                         </div>
