@@ -121,6 +121,33 @@ const Reader = () => {
         }
     }, []);
 
+    // Briefly highlight the element at a CFI — used to show "you were here"
+    // both when resuming a book and after a fold / fullscreen re-layout.
+    const flashCfi = useCallback((cfi) => {
+        if (!cfi) return;
+        try {
+            const contents = renditionRef.current?.getContents();
+            if (!contents || contents.length === 0) return;
+            const range = contents[0].range(cfi);
+            if (!range) return;
+            const el = range.startContainer.nodeType === Node.ELEMENT_NODE
+                ? range.startContainer
+                : range.startContainer.parentElement;
+            if (!el) return;
+            el.style.transition = 'background-color 0.5s ease, box-shadow 0.5s ease';
+            el.style.backgroundColor = 'rgba(255, 75, 75, 0.25)';
+            el.style.boxShadow = '0 0 8px rgba(255, 75, 75, 0.4)';
+            el.style.borderRadius = '4px';
+            setTimeout(() => {
+                el.style.backgroundColor = '';
+                el.style.boxShadow = '';
+                el.style.borderRadius = '';
+            }, 2500);
+        } catch {
+            // flash is a best-effort visual hint
+        }
+    }, []);
+
     // Load book from IndexedDB
     useEffect(() => {
         const loadBook = async () => {
@@ -284,32 +311,7 @@ const Reader = () => {
                     // Use a one-time relocated handler to ensure content is ready
                     const flashOnce = () => {
                         rendition.off('relocated', flashOnce);
-                        setTimeout(() => {
-                            try {
-                                const contents = renditionRef.current?.getContents();
-                                if (contents && contents.length > 0) {
-                                    const range = contents[0].range(startLocation);
-                                    if (range) {
-                                        const el = range.startContainer.nodeType === Node.ELEMENT_NODE
-                                            ? range.startContainer
-                                            : range.startContainer.parentElement;
-                                        if (el) {
-                                            el.style.transition = 'background-color 0.5s ease, box-shadow 0.5s ease';
-                                            el.style.backgroundColor = 'rgba(255, 75, 75, 0.25)';
-                                            el.style.boxShadow = '0 0 8px rgba(255, 75, 75, 0.4)';
-                                            el.style.borderRadius = '4px';
-                                            setTimeout(() => {
-                                                el.style.backgroundColor = '';
-                                                el.style.boxShadow = '';
-                                                el.style.borderRadius = '';
-                                            }, 3000);
-                                        }
-                                    }
-                                }
-                            } catch (err) {
-                                // Silently fail - flash is just a visual hint
-                            }
-                        }, 200);
+                        setTimeout(() => flashCfi(startLocation), 200);
                     };
                     rendition.on('relocated', flashOnce);
                 } else {
@@ -371,23 +373,32 @@ const Reader = () => {
 
         initReader();
 
-        // Handle screen resize (Samsung Fold, orientation change, etc.)
+        // Handle screen resize (Samsung Fold, orientation change, fullscreen).
+        // Capture the page's top position the INSTANT a resize burst begins —
+        // resize()/reflow emits 'relocated' which would otherwise overwrite
+        // lastLocationRef and land us on the wrong (often previous) page.
         let resizeTimeout;
+        let pendingResizeCfi = null;
         const handleResize = () => {
+            if (pendingResizeCfi == null) {
+                pendingResizeCfi = lastLocationRef.current;
+            }
             clearTimeout(resizeTimeout);
             resizeTimeout = setTimeout(async () => {
-                if (renditionRef.current && lastLocationRef.current) {
-                    // Capture CFI, re-layout for the new geometry, restore to the
-                    // same content position. Locations are content-based so they
-                    // survive the fold untouched — only the page count changes.
+                const cfi = pendingResizeCfi;
+                pendingResizeCfi = null;
+                if (renditionRef.current && cfi) {
                     renditionRef.current.resize('100%', '100%');
                     try {
-                        await renditionRef.current.display(lastLocationRef.current);
+                        await renditionRef.current.display(cfi);
                     } catch { /* ignore */ }
                     const loc = renditionRef.current.currentLocation?.();
-                    if (loc) updatePageCount(loc, true); // fold changes the layout
+                    if (loc) updatePageCount(loc, true); // layout changed
+                    // Flash the word/line that was at the top so you can see
+                    // where you were after the fold/unfold or fullscreen toggle.
+                    setTimeout(() => flashCfi(cfi), 150);
                 }
-            }, 300); // Debounce to avoid rapid re-renders during fold animation
+            }, 300); // Debounce to ride out the fold/fullscreen animation
         };
 
         window.addEventListener('resize', handleResize);
