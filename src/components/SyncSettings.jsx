@@ -19,6 +19,8 @@ import {
     saveSyncConfig,
     testConnection,
     performFullSync,
+    pushProgress,
+    pullProgress,
     triggerRescan,
 } from '../services/syncService';
 import { addBook, updateBookProgress, updateBook, deleteBook } from '../services/db';
@@ -84,6 +86,52 @@ const SyncSettings = ({ books, onSyncComplete, onClose }) => {
             setSyncResult({ synced: false, reason: err.message });
         }
 
+        setSyncing(false);
+    };
+
+    const handlePush = async () => {
+        setSyncing(true);
+        setSyncResult(null);
+        saveSyncConfig(config);
+        try {
+            const result = await pushProgress(books, async (id, updates) => {
+                await updateBook(id, updates);
+            });
+            setSyncResult(
+                result.synced
+                    ? { synced: true, message: `Pushed progress for ${result.pushed} book(s)`, errors: result.errors }
+                    : result
+            );
+            if (result.synced && onSyncComplete) onSyncComplete(result);
+        } catch (err) {
+            setSyncResult({ synced: false, reason: err.message });
+        }
+        setSyncing(false);
+    };
+
+    const handlePull = async () => {
+        setSyncing(true);
+        setSyncResult(null);
+        saveSyncConfig(config);
+        try {
+            const result = await pullProgress(
+                books,
+                async (id, location, progress) => {
+                    await updateBookProgress(id, location, progress);
+                },
+                async (id, updates) => {
+                    await updateBook(id, updates);
+                }
+            );
+            setSyncResult(
+                result.synced
+                    ? { synced: true, message: `Pulled progress for ${result.pulled} book(s)`, errors: result.errors }
+                    : result
+            );
+            if (result.synced && onSyncComplete) onSyncComplete(result);
+        } catch (err) {
+            setSyncResult({ synced: false, reason: err.message });
+        }
         setSyncing(false);
     };
 
@@ -211,45 +259,53 @@ const SyncSettings = ({ books, onSyncComplete, onClose }) => {
                         </AnimatePresence>
                     </div>
 
-                    {/* Sync Options */}
+                    {/* Progress: explicit Push / Pull (no automatic sync on open) */}
                     <div className="sync-section">
-                        <h3>Sync Options</h3>
+                        <h3>Reading Progress</h3>
+                        <p className="sync-hint">
+                            Choose when to save or load progress — nothing syncs automatically.
+                        </p>
 
-                        <label className="sync-toggle">
-                            <input
-                                type="checkbox"
-                                checked={config.enabled}
-                                onChange={(e) => handleConfigChange('enabled', e.target.checked)}
-                            />
-                            <span>Enable sync</span>
-                        </label>
+                        <div className="sync-actions-row">
+                            <button
+                                className="btn btn-primary btn-full"
+                                onClick={handlePush}
+                                disabled={syncing || !config.serverUrl}
+                                title="Send this device's reading position and read-state to the server"
+                            >
+                                <Upload size={16} />
+                                Push progress
+                            </button>
 
-                        <label className="sync-toggle">
-                            <input
-                                type="checkbox"
-                                checked={config.autoSync}
-                                onChange={(e) => handleConfigChange('autoSync', e.target.checked)}
-                            />
-                            <span>Auto-sync on app open</span>
-                        </label>
+                            <button
+                                className="btn btn-secondary btn-full"
+                                onClick={handlePull}
+                                disabled={syncing || !config.serverUrl}
+                                title="Load reading position and read-state from the server"
+                            >
+                                <Download size={16} />
+                                Pull progress
+                            </button>
+                        </div>
                     </div>
 
-                    {/* Sync Actions */}
+                    {/* Library: book files + metadata (explicit only) */}
                     <div className="sync-section">
-                        <h3>Actions</h3>
+                        <h3>Library (books)</h3>
 
                         <div className="sync-actions-col">
                             <button
-                                className="btn btn-primary btn-full"
+                                className="btn btn-secondary btn-full"
                                 onClick={handleSync}
                                 disabled={syncing || !config.serverUrl}
+                                title="Download new server books, upload new local books, and reconcile metadata"
                             >
                                 {syncing ? (
                                     <RefreshCw size={16} className="spinning" />
                                 ) : (
                                     <RefreshCw size={16} />
                                 )}
-                                {syncing ? 'Syncing...' : 'Sync Now'}
+                                {syncing ? 'Syncing...' : 'Full Sync (books + metadata)'}
                             </button>
 
                             <button

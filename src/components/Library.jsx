@@ -19,11 +19,10 @@ import {
     getBooks,
     addBook,
     deleteBook,
-    updateBookProgress,
     updateBook,
     toggleBookRead,
 } from '../services/db';
-import { getSyncConfig, performFullSync, renameSeries, updateServerBook } from '../services/syncService';
+import { getSyncConfig, renameSeries, updateServerBook } from '../services/syncService';
 import SyncSettings from './SyncSettings';
 
 const Library = () => {
@@ -36,7 +35,6 @@ const Library = () => {
     const [importing, setImporting] = useState(false);
     const [deleteConfirm, setDeleteConfirm] = useState(null);
     const [showSyncSettings, setShowSyncSettings] = useState(false);
-    const [syncStatus, setSyncStatus] = useState(null);
     const [selectedSeries, setSelectedSeries] = useState(null);
     const [editingSeries, setEditingSeries] = useState(null);
     const [seriesInput, setSeriesInput] = useState('');
@@ -155,14 +153,6 @@ const Library = () => {
         }
     };
 
-    // Auto-sync on load if configured
-    useEffect(() => {
-        const config = getSyncConfig();
-        if (config.enabled && config.autoSync && config.serverUrl && !loading) {
-            handleAutoSync();
-        }
-    }, [loading]);
-
     // Group books by series
     const seriesGroups = useMemo(() => {
         const groups = new Map();
@@ -193,41 +183,6 @@ const Library = () => {
     const getSeriesCover = (seriesBooks) => {
         const bookWithCover = seriesBooks.find((b) => b.cover);
         return bookWithCover?.cover || null;
-    };
-
-    const handleAutoSync = async () => {
-        setSyncStatus('syncing');
-        try {
-            const result = await performFullSync(
-                books,
-                async (bookData) => {
-                    const id = await addBook(bookData);
-                    return id;
-                },
-                async (id, location, progress) => {
-                    await updateBookProgress(id, location, progress);
-                },
-                async (id, updates) => {
-                    await updateBook(id, updates);
-                },
-                async (id) => {
-                    await deleteBook(id);
-                }
-            );
-            if (result.synced) {
-                setSyncStatus('success');
-                const updatedBooks = await getBooks();
-                setBooks(updatedBooks.reverse());
-                // Extract covers/authors in background
-                extractMissingCovers(updatedBooks);
-            } else {
-                setSyncStatus('error');
-            }
-            setTimeout(() => setSyncStatus(null), 3000);
-        } catch {
-            setSyncStatus('error');
-            setTimeout(() => setSyncStatus(null), 3000);
-        }
     };
 
     const handleSyncComplete = async () => {
@@ -679,15 +634,12 @@ const Library = () => {
                         </label>
 
                         <button
-                            className={`btn btn-secondary sync-btn ${syncStatus ? 'sync-' + syncStatus : ''}`}
+                            className="btn btn-secondary sync-btn"
                             onClick={() => setShowSyncSettings(true)}
                             title="Sync Server Settings"
                         >
                             <Server size={20} />
                             Sync
-                            {syncStatus === 'syncing' && <span className="sync-indicator syncing" />}
-                            {syncStatus === 'success' && <span className="sync-indicator success" />}
-                            {syncStatus === 'error' && <span className="sync-indicator error" />}
                         </button>
                     </div>
                 )}

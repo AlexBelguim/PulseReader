@@ -52,17 +52,17 @@ export function syncRouter(db, booksDir) {
      */
     router.post('/progress', (req, res) => {
         try {
-            const { progress: progressUpdates } = req.body;
+            const { progress: progressUpdates, force } = req.body;
             if (!Array.isArray(progressUpdates)) {
                 return res.status(400).json({ error: 'Expected progress array' });
             }
 
-            // Highest-progress-wins for progress, is_read is synced separately
-            const upsert = db.prepare(`
+            // Default (auto) merge: highest-progress-wins, is_read is sticky.
+            const mergeUpsert = db.prepare(`
                 INSERT INTO reading_progress (book_id, location, progress, is_read, updated_at)
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(book_id) DO UPDATE SET
-                    location = CASE 
+                    location = CASE
                         WHEN excluded.progress > reading_progress.progress THEN excluded.location
                         ELSE reading_progress.location
                     END,
@@ -79,6 +79,20 @@ export function syncRouter(db, booksDir) {
                         ELSE reading_progress.updated_at
                     END
             `);
+
+            // Explicit push: the client is the source of truth, so overwrite
+            // unconditionally. Lets the user lower progress or clear read-state.
+            const forceUpsert = db.prepare(`
+                INSERT INTO reading_progress (book_id, location, progress, is_read, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(book_id) DO UPDATE SET
+                    location = excluded.location,
+                    progress = excluded.progress,
+                    is_read = excluded.is_read,
+                    updated_at = excluded.updated_at
+            `);
+
+            const upsert = force ? forceUpsert : mergeUpsert;
 
             const transaction = db.transaction((updates) => {
                 for (const update of updates) {

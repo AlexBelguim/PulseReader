@@ -159,14 +159,142 @@ export async function uploadCover(bookId, coverBlob) {
 }
 
 /**
- * Sync reading progress with the server (batch)
+ * Sync reading progress with the server (batch).
+ * When `force` is true the server overwrites unconditionally (explicit push).
  */
-export async function syncProgress(progressUpdates) {
+export async function syncProgress(progressUpdates, force = false) {
     const response = await syncFetch('/api/sync/progress', {
         method: 'POST',
-        body: JSON.stringify({ progress: progressUpdates }),
+        body: JSON.stringify({ progress: progressUpdates, force }),
     });
     return response.json();
+}
+
+/**
+ * Match local books to server books by syncId, then title, then file size.
+ * Returns [{ localBook, serverBook }] with each server book matched once.
+ */
+function matchLocalToServer(localBooks, serverBooks) {
+    const serverById = new Map();
+    const serverByTitle = new Map();
+    const serverByFileSize = new Map();
+    for (const book of serverBooks) {
+        serverById.set(book.id, book);
+        if (book.title) serverByTitle.set(book.title.toLowerCase(), book);
+        if (book.file_size) serverByFileSize.set(book.file_size, book);
+    }
+
+    const matchedServerIds = new Set();
+    const pairs = [];
+    for (const localBook of localBooks) {
+        let serverBook = null;
+        if (localBook.syncId && serverById.has(localBook.syncId)) {
+            serverBook = serverById.get(localBook.syncId);
+        }
+        if (!serverBook && localBook.title) {
+            const key = localBook.title.toLowerCase();
+            if (serverByTitle.has(key) && !matchedServerIds.has(serverByTitle.get(key).id)) {
+                serverBook = serverByTitle.get(key);
+            }
+        }
+        if (!serverBook && localBook.data) {
+            const localSize = localBook.data.byteLength || localBook.data.size || 0;
+            if (localSize > 0 && serverByFileSize.has(localSize) && !matchedServerIds.has(serverByFileSize.get(localSize).id)) {
+                serverBook = serverByFileSize.get(localSize);
+            }
+        }
+        if (serverBook && !matchedServerIds.has(serverBook.id)) {
+            pairs.push({ localBook, serverBook });
+            matchedServerIds.add(serverBook.id);
+        }
+    }
+    return pairs;
+}
+
+/**
+ * PUSH — send local reading progress + read-state up to the server.
+ * Progress only: never uploads/downloads book files. The server takes the
+ * local state as truth (force overwrite).
+ */
+export async function pushProgress(localBooks, updateBookFn) {
+    const config = getSyncConfig();
+    if (!config.serverUrl) {
+        return { synced: false, reason: 'Sync server URL not configured' };
+    }
+
+    const result = { pushed: 0, errors: [] };
+    try {
+        const serverStatus = await getSyncStatus();
+        const pairs = matchLocalToServer(localBooks, serverStatus.books);
+
+        const updates = [];
+        for (const { localBook, serverBook } of pairs) {
+            // Link the local book to its server id for future syncs.
+            if (!localBook.syncId && updateBookFn) {
+                try { await updateBookFn(localBook.id, { syncId: serverBook.id }); } catch { /* ignore */ }
+            }
+            updates.push({
+                book_id: serverBook.id,
+                location: localBook.lastRead || null,
+                progress: localBook.progress || 0,
+                is_read: localBook.isRead || false,
+                updated_at: new Date().toISOString(),
+            });
+        }
+
+        if (updates.length > 0) {
+            await syncProgress(updates, true);
+            result.pushed = updates.length;
+        }
+        return { synced: true, ...result };
+    } catch (err) {
+        return { synced: false, reason: err.message, ...result };
+    }
+}
+
+/**
+ * PULL — take the server's reading progress + read-state down to local.
+ * Progress only: never uploads/downloads book files. For matched books that
+ * have a progress row on the server, local is overwritten to mirror it
+ * (so read-state can also be cleared from another device).
+ */
+export async function pullProgress(localBooks, updateProgressFn, updateBookFn) {
+    const config = getSyncConfig();
+    if (!config.serverUrl) {
+        return { synced: false, reason: 'Sync server URL not configured' };
+    }
+
+    const result = { pulled: 0, errors: [] };
+    try {
+        const serverStatus = await getSyncStatus();
+        const pairs = matchLocalToServer(localBooks, serverStatus.books);
+
+        for (const { localBook, serverBook } of pairs) {
+            if (!localBook.syncId && updateBookFn) {
+                try { await updateBookFn(localBook.id, { syncId: serverBook.id }); } catch { /* ignore */ }
+            }
+
+            // A non-null progress timestamp means the server actually has a
+            // reading_progress row for this book.
+            const hasServerRow = serverBook.progress_updated_at != null;
+            if (!hasServerRow) continue;
+
+            try {
+                await updateProgressFn(
+                    localBook.id,
+                    serverBook.last_read || null,
+                    serverBook.progress || 0,
+                );
+                await updateBookFn(localBook.id, { isRead: serverBook.is_read === 1 });
+                result.pulled++;
+            } catch (err) {
+                result.errors.push(`Failed to update "${localBook.title}": ${err.message}`);
+            }
+        }
+        return { synced: true, ...result };
+    } catch (err) {
+        return { synced: false, reason: err.message, ...result };
+    }
 }
 
 /**

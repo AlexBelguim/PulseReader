@@ -12,11 +12,26 @@ import {
     Maximize,
     Minimize,
 } from 'lucide-react';
-import { getBook, updateBookProgress } from '../services/db';
+import {
+    getBook,
+    getProgress,
+    updateBookProgress,
+    saveProgress,
+    getLocationsCache,
+    saveLocationsCache,
+} from '../services/db';
 import { useReaderSettings } from '../hooks/useReaderSettings';
 import ReaderSettings from './ReaderSettings';
 import TableOfContents from './TableOfContents';
 import RSVPOverlay from './RSVPOverlay';
+
+// Signature of the settings that actually affect typography/layout. Used to
+// avoid re-paginating the book when an unrelated setting (e.g. RSVP speed)
+// changes.
+const computeStyleSig = (s) => JSON.stringify([
+    s.colorTheme, s.fontType, s.fontSize, s.fontWeight,
+    s.lineSpacing, s.textAlignment, s.pageMargins,
+]);
 
 const Reader = () => {
     const { bookId } = useParams();
@@ -36,6 +51,8 @@ const Reader = () => {
     const [currentLocation, setCurrentLocation] = useState(null);
     const [progress, setProgress] = useState(0);
     const [locationsReady, setLocationsReady] = useState(false);
+    const [currentPage, setCurrentPage] = useState(0);
+    const [totalPages, setTotalPages] = useState(0);
 
     // UI State
     const [showSettings, setShowSettings] = useState(false);
@@ -64,8 +81,45 @@ const Reader = () => {
         viewMode: settings.viewMode,
         twoPageLayout: settings.twoPageLayout,
     });
+    // Latest style generator (so the content hook injects current settings into
+    // newly-loaded sections) and the last applied typography signature.
+    const getEpubStylesRef = useRef(getEpubStyles);
+    getEpubStylesRef.current = getEpubStyles;
+    const styleSigRef = useRef(computeStyleSig(settings));
 
+    // Fraction of the whole book that one screen page spans. Calibrated from
+    // the visible span once per layout (open / font change / fold) and frozen
+    // while reading, so the page total stays stable instead of jumping per page.
+    const pageFractionRef = useRef(0);
 
+    // Derive a screen-accurate "page X / Y". Pass recalibrate=true on a layout
+    // change so the fraction (and therefore the total) is re-measured for the
+    // new font size / margins / viewport; otherwise only the current page moves.
+    const updatePageCount = useCallback((location, recalibrate = false) => {
+        try {
+            const loc = bookRef.current?.locations;
+            if (!loc || !loc.length()) return;
+            const startCfi = location?.start?.cfi;
+            if (!startCfi) return;
+            const sPct = loc.percentageFromCfi(startCfi);
+
+            if (recalibrate || !(pageFractionRef.current > 0)) {
+                const endCfi = location?.end?.cfi;
+                const ePct = endCfi ? loc.percentageFromCfi(endCfi) : sPct;
+                const frac = ePct - sPct;
+                if (frac > 0 && isFinite(frac)) pageFractionRef.current = frac;
+            }
+
+            const frac = pageFractionRef.current;
+            if (!(frac > 0)) return;
+            const total = Math.max(1, Math.round(1 / frac));
+            const cur = Math.min(total, Math.max(1, Math.round(sPct / frac) + 1));
+            setTotalPages(total);
+            setCurrentPage(cur);
+        } catch {
+            // best-effort — fall back to the percentage display
+        }
+    }, []);
 
     // Load book from IndexedDB
     useEffect(() => {
@@ -77,6 +131,15 @@ const Reader = () => {
                 if (!bookData) {
                     setError('Book not found');
                     return;
+                }
+
+                // Reading position now lives in a separate store; merge it in
+                // so the resume logic below can read book.lastRead.
+                const prog = await getProgress(parseInt(bookId));
+                if (prog) {
+                    bookData.lastRead = prog.cfi;
+                    bookData.progress = prog.percentage;
+                    bookData.isRead = prog.isRead;
                 }
 
                 setBook(bookData);
@@ -144,9 +207,22 @@ const Reader = () => {
                     }
                 });
 
-                // Inject custom CSS
+                // Inject custom CSS synchronously as an inline <style> on every
+                // content document. Doing this inline (instead of an async blob
+                // <link>) means the very first pagination already uses the saved
+                // font size / margins — so settings apply the moment a book
+                // opens instead of only after toggling something. The ref keeps
+                // newly-loaded sections on the latest settings.
                 rendition.hooks.content.register((contents) => {
-                    contents.addStylesheet(generateStyleUrl());
+                    const doc = contents.document;
+                    if (!doc) return;
+                    let styleEl = doc.getElementById('reader-custom-styles');
+                    if (!styleEl) {
+                        styleEl = doc.createElement('style');
+                        styleEl.id = 'reader-custom-styles';
+                        doc.head.appendChild(styleEl);
+                    }
+                    styleEl.textContent = getEpubStylesRef.current();
                 });
 
                 // Handle location changes
@@ -164,7 +240,12 @@ const Reader = () => {
                         setCurrentChapter(location.start.href);
                     }
 
-                    // Save progress to database
+                    // Rendered page X / Y from the currently visible span.
+                    // The span shrinks/grows with font size, margins and screen
+                    // width, so this naturally reflects the live layout.
+                    updatePageCount(location);
+
+                    // Save progress to database (lightweight — progress store only)
                     if (location.start?.cfi) {
                         updateBookProgress(
                             parseInt(bookId),
@@ -235,17 +316,40 @@ const Reader = () => {
                     await rendition.display();
                 }
 
-                // Generate locations for progress slider seeking
-                epubBook.locations.generate(150).then(() => {
+                // Locations power the % slider and the page counter. They are
+                // content-based (independent of font/screen), so we cache them
+                // per book — first open generates once, every open after is
+                // instant instead of re-parsing the whole book.
+                const LOCATION_CHARS = 1000;
+                const onLocationsReady = () => {
                     setLocationsReady(true);
-                    // Update slider position from current reading position
+                    const loc = renditionRef.current?.currentLocation?.();
+                    if (loc) updatePageCount(loc, true);
                     if (lastLocationRef.current) {
                         const pct = epubBook.locations.percentageFromCfi(lastLocationRef.current);
-                        if (pct !== undefined && pct !== null) {
-                            setProgress(pct);
-                        }
+                        if (pct !== undefined && pct !== null) setProgress(pct);
                     }
-                });
+                };
+
+                const cached = await getLocationsCache(parseInt(bookId));
+                if (cached?.json && cached.chars === LOCATION_CHARS) {
+                    try {
+                        epubBook.locations.load(cached.json);
+                        onLocationsReady();
+                    } catch {
+                        epubBook.locations.generate(LOCATION_CHARS).then(onLocationsReady);
+                    }
+                } else {
+                    epubBook.locations.generate(LOCATION_CHARS).then(() => {
+                        try {
+                            saveLocationsCache(parseInt(bookId), {
+                                json: epubBook.locations.save(),
+                                chars: LOCATION_CHARS,
+                            });
+                        } catch { /* cache is best-effort */ }
+                        onLocationsReady();
+                    });
+                }
 
                 // Auto-hide UI after 3 seconds for immersive reading
                 uiAutoHideTimerRef.current = setTimeout(() => {
@@ -257,6 +361,7 @@ const Reader = () => {
                     viewMode: settings.viewMode,
                     twoPageLayout: settings.twoPageLayout,
                 };
+                styleSigRef.current = computeStyleSig(settings);
 
             } catch (err) {
                 console.error('Failed to initialize reader:', err);
@@ -272,11 +377,15 @@ const Reader = () => {
             clearTimeout(resizeTimeout);
             resizeTimeout = setTimeout(async () => {
                 if (renditionRef.current && lastLocationRef.current) {
+                    // Capture CFI, re-layout for the new geometry, restore to the
+                    // same content position. Locations are content-based so they
+                    // survive the fold untouched — only the page count changes.
                     renditionRef.current.resize('100%', '100%');
-                    renditionRef.current.display(lastLocationRef.current);
-
-                    // No need to regenerate locations — percentage is position-based
-                    // The resize + display above handles visual re-pagination
+                    try {
+                        await renditionRef.current.display(lastLocationRef.current);
+                    } catch { /* ignore */ }
+                    const loc = renditionRef.current.currentLocation?.();
+                    if (loc) updatePageCount(loc, true); // fold changes the layout
                 }
             }, 300); // Debounce to avoid rapid re-renders during fold animation
         };
@@ -298,13 +407,6 @@ const Reader = () => {
         };
     }, [book?.data, bookId, settings.viewMode, settings.twoPageLayout]);
 
-    // Generate a data URL for the stylesheet
-    const generateStyleUrl = useCallback(() => {
-        const styles = getEpubStyles();
-        const blob = new Blob([styles], { type: 'text/css' });
-        return URL.createObjectURL(blob);
-    }, [getEpubStyles]);
-
     // Update rendition styles when settings change (not requiring re-init)
     useEffect(() => {
         if (!renditionRef.current) return;
@@ -314,6 +416,13 @@ const Reader = () => {
             settings.twoPageLayout !== prevSettingsRef.current.twoPageLayout) {
             return;
         }
+
+        // Only re-style/re-paginate when a setting that affects typography
+        // actually changed. This stops unrelated changes — most importantly
+        // adjusting the RSVP speed mid-read — from re-paginating the book.
+        const sig = computeStyleSig(settings);
+        if (sig === styleSigRef.current) return;
+        styleSigRef.current = sig;
 
         const rendition = renditionRef.current;
 
@@ -342,12 +451,16 @@ const Reader = () => {
 
         // Force re-display at current position so epub.js re-paginates
         // with the new styles. Without this, changing font/margins/spacing
-        // breaks the paginated layout.
+        // breaks the paginated layout. Re-calibrate the page total afterwards
+        // so "page X / Y" reflects the new typography.
         if (lastLocationRef.current) {
-            rendition.display(lastLocationRef.current);
+            rendition.display(lastLocationRef.current).then(() => {
+                const loc = rendition.currentLocation?.();
+                if (loc) updatePageCount(loc, true);
+            });
         }
 
-    }, [settings, getEpubStyles, themeColors]);
+    }, [settings, getEpubStyles, themeColors, updatePageCount]);
 
     // Navigation functions with debouncing
     const goNext = useCallback(() => {
@@ -482,21 +595,27 @@ const Reader = () => {
         };
     }, [wordSelectMode]);
 
-    // Handle RSVP close - navigate to the last read position and highlight it
+    // Handle RSVP close - navigate to the last read position, persist the
+    // exact word we stopped on, and highlight it.
     const handleRSVPCloseWithPosition = useCallback((wordInfo) => {
         if (!renditionRef.current) return;
 
-        // If we have a CFI, navigate to it first
-        if (wordInfo?.cfi) {
-            renditionRef.current.display(wordInfo.cfi).then(() => {
-                // After navigation, highlight the word
+        const cfi = wordInfo?.cfi;
+        if (cfi) {
+            let pct;
+            try { pct = bookRef.current?.locations?.percentageFromCfi?.(cfi); } catch { /* ignore */ }
+            renditionRef.current.display(cfi).then(() => {
+                // Re-assert the exact word position: display() emits 'relocated',
+                // which otherwise saves the page-start CFI and loses the word.
+                lastLocationRef.current = cfi;
+                saveProgress(parseInt(bookId), { cfi, percentage: pct ?? progress });
                 highlightLastWord(wordInfo);
             });
         } else if (wordInfo?.parent) {
             // Fallback: just highlight without navigation
             highlightLastWord(wordInfo);
         }
-    }, []);
+    }, [bookId, progress]);
 
     // Helper function to highlight the last word
     const highlightLastWord = useCallback((wordInfo) => {
@@ -835,7 +954,9 @@ const Reader = () => {
                                 onClick={(e) => e.stopPropagation()}
                             />
                             <span className="progress-text">
-                                {`${Math.round(progress * 100)}%`}
+                                {totalPages > 0
+                                    ? `${currentPage} / ${totalPages}`
+                                    : `${Math.round(progress * 100)}%`}
                             </span>
                         </div>
 
