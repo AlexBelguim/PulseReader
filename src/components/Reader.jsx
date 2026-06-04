@@ -41,6 +41,9 @@ const Reader = () => {
     const bookRef = useRef(null);
     const isNavigatingRef = useRef(false);
     const lastLocationRef = useRef(null);
+    // True while a fold/fullscreen re-layout is re-displaying. Resize emits its
+    // own 'relocated' events; we ignore them so they can't drift the anchor.
+    const isResizingRef = useRef(false);
 
     // State
     const [book, setBook] = useState(null);
@@ -254,6 +257,15 @@ const Reader = () => {
 
                 // Handle location changes
                 rendition.on('relocated', (location) => {
+                    // Ignore relocations caused by our own fold/fullscreen
+                    // re-display — otherwise the anchor drifts backward each
+                    // time because display(cfi) lands on a page that starts
+                    // slightly before the cfi.
+                    if (isResizingRef.current) {
+                        isNavigatingRef.current = false;
+                        return;
+                    }
+
                     setCurrentLocation(location);
                     lastLocationRef.current = location.start?.cfi;
 
@@ -388,6 +400,9 @@ const Reader = () => {
                 const cfi = pendingResizeCfi;
                 pendingResizeCfi = null;
                 if (renditionRef.current && cfi) {
+                    // Hold the anchor steady across the whole re-layout so the
+                    // resize's own relocations can't move it (see relocated guard).
+                    isResizingRef.current = true;
                     renditionRef.current.resize('100%', '100%');
                     try {
                         await renditionRef.current.display(cfi);
@@ -396,7 +411,10 @@ const Reader = () => {
                     if (loc) updatePageCount(loc, true); // layout changed
                     // Flash the word/line that was at the top so you can see
                     // where you were after the fold/unfold or fullscreen toggle.
-                    setTimeout(() => flashCfi(cfi), 150);
+                    setTimeout(() => {
+                        flashCfi(cfi);
+                        isResizingRef.current = false;
+                    }, 150);
                 }
             }, 300); // Debounce to ride out the fold/fullscreen animation
         };
