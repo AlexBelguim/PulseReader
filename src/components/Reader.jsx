@@ -124,18 +124,51 @@ const Reader = () => {
         }
     }, []);
 
-    // Briefly highlight the element at a CFI — used to show "you were here"
-    // both when resuming a book and after a fold / fullscreen re-layout.
+    // Briefly highlight just the first few words at a CFI — used to show
+    // "you were here" when resuming a book and after a fold/fullscreen
+    // re-layout. Wraps only the words (not the whole paragraph) in a temporary
+    // inline span, then unwraps it. Inline wrapping doesn't change layout, so
+    // it can't repaginate. Falls back to an element flash if wrapping fails.
     const flashCfi = useCallback((cfi) => {
         if (!cfi) return;
         try {
             const contents = renditionRef.current?.getContents();
             if (!contents || contents.length === 0) return;
-            const range = contents[0].range(cfi);
-            if (!range) return;
-            const el = range.startContainer.nodeType === Node.ELEMENT_NODE
-                ? range.startContainer
-                : range.startContainer.parentElement;
+            const startRange = contents[0].range(cfi);
+            if (!startRange) return;
+
+            const node = startRange.startContainer;
+            const startOffset = startRange.startOffset;
+
+            // Build a range over the first ~6 words from the anchor.
+            if (node.nodeType === Node.TEXT_NODE) {
+                const doc = node.ownerDocument;
+                const rest = node.textContent.slice(startOffset);
+                const m = rest.match(/^\s*(?:\S+\s+){0,5}\S+/);
+                const len = m ? m[0].length : Math.min(rest.length, 40);
+                if (len > 0) {
+                    const range = doc.createRange();
+                    range.setStart(node, startOffset);
+                    range.setEnd(node, Math.min(startOffset + len, node.textContent.length));
+
+                    const span = doc.createElement('span');
+                    span.style.cssText =
+                        'background-color: rgba(255,75,75,0.45); box-shadow: 0 0 8px rgba(255,75,75,0.5); border-radius: 3px;';
+                    range.surroundContents(span);
+
+                    setTimeout(() => {
+                        const parent = span.parentNode;
+                        if (!parent) return;
+                        while (span.firstChild) parent.insertBefore(span.firstChild, span);
+                        parent.removeChild(span);
+                        parent.normalize();
+                    }, 3000);
+                    return;
+                }
+            }
+
+            // Fallback: flash the containing element
+            const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
             if (!el) return;
             el.style.transition = 'background-color 0.5s ease, box-shadow 0.5s ease';
             el.style.backgroundColor = 'rgba(255, 75, 75, 0.25)';
