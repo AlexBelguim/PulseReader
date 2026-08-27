@@ -55,6 +55,41 @@ let threw = null;
 try { await scanBooksFolder(db2, empty2); } catch (e) { threw = e.message; }
 check('empty DB + empty dir is a no-op, not an error', threw === null, threw || 'ok');
 
+// 4. A renamed book is the same book. Identity used to be the file path, so
+//    renaming deleted the row and inserted a fresh uuid, taking progress along.
+fs.renameSync(path.join(seriesDir, 'Dune.epub'), path.join(seriesDir, 'Dune (1965).epub'));
+await scanBooksFolder(db, booksDir);
+const renamed = db.prepare("SELECT filepath, title FROM books WHERE id='b1'").get();
+check('a renamed book keeps its row', !!renamed, renamed ? `filepath=${renamed.filepath}` : 'ROW GONE');
+check('the renamed row points at the new path',
+    renamed?.filepath === path.join('SciFi', 'Dune (1965).epub'), renamed?.filepath || 'n/a');
+const keptProg = db.prepare("SELECT progress FROM reading_progress WHERE book_id='b1'").get();
+check('reading progress survives a rename', keptProg?.progress === 0.62,
+    keptProg ? `progress=${keptProg.progress}` : 'ROW GONE');
+check('a rename does not leave a duplicate row', books() === 1, `${books()} books`);
+
+// 5. Moving between series folders is the same book too.
+const otherDir = path.join(booksDir, 'Classics');
+fs.mkdirSync(otherDir, { recursive: true });
+fs.renameSync(path.join(seriesDir, 'Dune (1965).epub'), path.join(otherDir, 'Dune (1965).epub'));
+await scanBooksFolder(db, booksDir);
+const moved = db.prepare("SELECT series FROM books WHERE id='b1'").get();
+check('a book moved between series keeps its row', moved?.series === 'Classics',
+    moved ? `series=${moved.series}` : 'ROW GONE');
+check('progress survives the move',
+    db.prepare("SELECT progress FROM reading_progress WHERE book_id='b1'").get()?.progress === 0.62);
+
+// 6. An identical COPY is a new book, not a rename: the original is still on
+//    disk, so its progress must not be handed to the duplicate.
+fs.copyFileSync(path.join(otherDir, 'Dune (1965).epub'), path.join(seriesDir, 'Dune copy.epub'));
+await scanBooksFolder(db, booksDir);
+check('an identical copy inserts a new row', books() === 2, `${books()} books`);
+const origStill = db.prepare("SELECT series FROM books WHERE id='b1'").get();
+check('the copy does not steal the original row', origStill?.series === 'Classics',
+    origStill ? `series=${origStill.series}` : 'ROW GONE');
+check('the original keeps its progress after a copy appears',
+    db.prepare("SELECT progress FROM reading_progress WHERE book_id='b1'").get()?.progress === 0.62);
+
 let failed = 0;
 console.log('\n--- scanner floor ---');
 for (const r of results) { if (!r.pass) failed++; console.log(`${r.pass ? 'PASS' : 'FAIL'}  ${r.n}${r.detail ? `  (${r.detail})` : ''}`); }

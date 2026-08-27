@@ -10,7 +10,7 @@ const EPUB_EXTENSION = '.epub';
  * Compute a hash of a file for change detection.
  * Uses first 64KB + file size for speed.
  */
-function computeFileHash(filepath) {
+export function computeFileHash(filepath) {
     const stat = fs.statSync(filepath);
     const fd = fs.openSync(filepath, 'r');
     const buffer = Buffer.alloc(Math.min(65536, stat.size));
@@ -79,6 +79,50 @@ export async function scanBooksFolder(db, booksDir) {
     const seenPaths = new Set();
     let count = 0;
 
+    // A book that was renamed or moved between series folders is still the same
+    // book. Identity here was the file path, so "Dune.epub" -> "Dune (1965).epub"
+    // read as one deletion plus one arrival: the old row was dropped, a fresh
+    // uuid inserted, and the reading progress -- keyed on the old id -- went
+    // with the deletion. The hash is already computed on every scan for change
+    // detection, so it costs nothing to also use it as identity.
+    const existingByHash = new Map();
+    for (const b of existingBooks) {
+        if (!b.file_hash) continue;
+        if (!existingByHash.has(b.file_hash)) existingByHash.set(b.file_hash, []);
+        existingByHash.get(b.file_hash).push(b);
+    }
+
+    /**
+     * Claim the row of a book that used to live somewhere else, or null when
+     * this is genuinely a new file. Claiming consumes the row so no second file
+     * can take it and the delete pass cannot remove it under its old path.
+     */
+    const claimRenamedRow = (fileHash, relativePath) => {
+        if (!fileHash) return null;
+        const candidates = existingByHash.get(fileHash);
+        if (!candidates || candidates.length === 0) return null;
+
+        const moved = candidates.filter((c) => (
+            c.filepath !== relativePath
+            // Still owned by the pre-scan snapshot, i.e. not already claimed.
+            && existingByPath.has(c.filepath)
+            && !seenPaths.has(c.filepath)
+            // The decisive test. If the old file is still on disk this is a
+            // second copy, not a rename, and taking its row would hand the
+            // reader's progress to the duplicate.
+            && !fs.existsSync(path.join(booksDir, c.filepath))
+        ));
+
+        // Two identical files renamed in the same scan: there is no honest way
+        // to say whose progress is whose, so fall through to a fresh insert.
+        if (moved.length !== 1) return null;
+
+        const match = moved[0];
+        existingByPath.delete(match.filepath);
+        existingByHash.set(fileHash, candidates.filter((c) => c.id !== match.id));
+        return match;
+    };
+
     const entries = fs.readdirSync(booksDir, { withFileTypes: true });
 
     for (const entry of entries) {
@@ -127,11 +171,21 @@ export async function scanBooksFolder(db, booksDir) {
                         `).run(fileHash, fileSize, bookCover, seriesName, existing.id);
                     }
                 } else {
-                    // Insert new book
-                    db.prepare(`
-                        INSERT INTO books (id, title, author, series, filename, filepath, cover_path, file_hash, file_size)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    `).run(uuidv4(), title, 'Unknown Author', seriesName, file.name, relativePath, bookCover, fileHash, fileSize);
+                    const renamed = claimRenamedRow(fileHash, relativePath);
+                    if (renamed) {
+                        // Same id, new location: reading_progress stays attached.
+                        db.prepare(`
+                            UPDATE books SET title = ?, series = ?, filename = ?, filepath = ?,
+                            cover_path = ?, file_size = ?, updated_at = datetime('now')
+                            WHERE id = ?
+                        `).run(title, seriesName, file.name, relativePath, bookCover, fileSize, renamed.id);
+                    } else {
+                        // Insert new book
+                        db.prepare(`
+                            INSERT INTO books (id, title, author, series, filename, filepath, cover_path, file_hash, file_size)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        `).run(uuidv4(), title, 'Unknown Author', seriesName, file.name, relativePath, bookCover, fileHash, fileSize);
+                    }
                 }
                 count++;
             }
@@ -163,10 +217,20 @@ export async function scanBooksFolder(db, booksDir) {
                     `).run(fileHash, fileSize, bookCover, existing.id);
                 }
             } else {
-                db.prepare(`
-                    INSERT INTO books (id, title, author, series, filename, filepath, cover_path, file_hash, file_size)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                `).run(uuidv4(), title, 'Unknown Author', 'Uncategorized', entry.name, relativePath, bookCover, fileHash, fileSize);
+                const renamed = claimRenamedRow(fileHash, relativePath);
+                if (renamed) {
+                    // Covers a book dragged out of a series folder into the root.
+                    db.prepare(`
+                        UPDATE books SET title = ?, series = ?, filename = ?, filepath = ?,
+                        cover_path = ?, file_size = ?, updated_at = datetime('now')
+                        WHERE id = ?
+                    `).run(title, 'Uncategorized', entry.name, relativePath, bookCover, fileSize, renamed.id);
+                } else {
+                    db.prepare(`
+                        INSERT INTO books (id, title, author, series, filename, filepath, cover_path, file_hash, file_size)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    `).run(uuidv4(), title, 'Unknown Author', 'Uncategorized', entry.name, relativePath, bookCover, fileHash, fileSize);
+                }
             }
             count++;
         }

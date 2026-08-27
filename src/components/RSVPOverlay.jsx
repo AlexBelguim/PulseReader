@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { tokenizeWithOffsets } from '../utils/tokenize';
 import {
     X,
     Play,
@@ -43,7 +44,11 @@ const RSVPOverlay = ({
     const [extracting, setExtracting] = useState(false);
     const [error, setError] = useState(null);
     const [stoppedAtImage, setStoppedAtImage] = useState(false);
-    const [imageStopIndex, setImageStopIndex] = useState(-1);
+    // The stop we are currently paused on ({ wordIndex, src }), or null. This
+    // used to be a forward-only index pointer, which went stale the moment the
+    // reader skipped or scrubbed: playback then matched `next >= pointer`
+    // forever and froze on an image it had already gone past.
+    const [activeStop, setActiveStop] = useState(null);
     const [showImagePreview, setShowImagePreview] = useState(false);
     const [currentImageSrc, setCurrentImageSrc] = useState(null);
     const [chapterBreak, setChapterBreak] = useState(false); // brief "new chapter" hint
@@ -64,8 +69,14 @@ const RSVPOverlay = ({
     const imageStopPointsRef = useRef([]); // Array of { wordIndex, src }
     const currentCfiRef = useRef(null); // Track current CFI for page navigation
     const textNodesRef = useRef([]); // Track text nodes for CFI generation
+    const wordOffsetsRef = useRef([]); // Char offset of each word within its text node
+    // Image stops the reader has already been shown and dismissed, so passing
+    // one again (or scrubbing back over it) does not re-trigger the pause.
+    const dismissedStopsRef = useRef(new Set());
     const isLoadingNextPageRef = useRef(false); // Prevent double-triggers during section advance
     const chapterPauseRef = useRef(false); // Apply CHAPTER_PAUSE_MS to the next word
+    const chapterBreakTimerRef = useRef(null);
+    const pageNavTimerRef = useRef(null);
 
     // Calculate base interval from WPM
     const getBaseInterval = useCallback(() => {
@@ -254,16 +265,17 @@ const RSVPOverlay = ({
                     continue;
                 }
 
-                const text = node.textContent.trim();
-                if (!text) continue;
+                const raw = node.textContent;
+                if (!raw || !raw.trim()) continue;
 
-                const nodeWords = text.split(/\s+/).filter(w => w.length > 0);
-                textWordCount += nodeWords.length;
-                nodeWords.forEach((w) => {
-                    extractedWords.push({ text: w, isImage: false });
+                // Each word carries the offset it actually sits at, so the CFI
+                // builder never has to search for it by value. See tokenize.js.
+                for (const { text: w, offset } of tokenizeWithOffsets(raw)) {
+                    extractedWords.push({ text: w, isImage: false, offset });
                     elements.push({ parent: node.parentElement, isImage: false });
                     textNodes.push(node);
-                });
+                    textWordCount++;
+                }
             }
         });
 
@@ -278,11 +290,15 @@ const RSVPOverlay = ({
             }
         }
 
-        const displayWords = extractedWords.filter(w => !w.isImage).map(w => w.text);
+        const textOnly = extractedWords.filter(w => !w.isImage);
+        const displayWords = textOnly.map(w => w.text);
+        // Parallel to displayWords: the character offset of each word inside its
+        // own text node, so nothing ever has to search for a word by value.
+        const displayOffsets = textOnly.map(w => w.offset);
         const displayElements = elements.filter(e => !e.isImage);
         const displayTextNodes = textNodes.filter((_, i) => !extractedWords[i]?.isImage);
 
-        return { displayWords, displayElements, displayTextNodes, imageStops };
+        return { displayWords, displayOffsets, displayElements, displayTextNodes, imageStops };
     }, []);
 
     // Extract the current section (whole chapter) and choose the starting word.
@@ -296,7 +312,8 @@ const RSVPOverlay = ({
             setExtracting(true);
             setError(null);
             setStoppedAtImage(false);
-            setImageStopIndex(-1);
+            setActiveStop(null);
+            dismissedStopsRef.current = new Set();
             setShowImagePreview(false);
             setCurrentImageSrc(null);
             lastWordBeforeImageRef.current = null;
@@ -315,17 +332,17 @@ const RSVPOverlay = ({
             // begin at the on-screen position rather than the top of the chapter.
             const visibleRange = getVisibleRange();
 
-            const { displayWords, displayElements, displayTextNodes, imageStops } =
+            const { displayWords, displayOffsets, displayElements, displayTextNodes, imageStops } =
                 extractWordsFromContents(contents);
 
+            // No "current stop" pointer to prime -- the stop to pause at is
+            // derived from where the reader actually is, each tick.
             imageStopPointsRef.current = imageStops;
-            if (imageStops.length > 0) {
-                setImageStopIndex(imageStops[0].wordIndex);
-            }
 
             wordsRef.current = displayWords;
             wordElementsRef.current = displayElements;
             textNodesRef.current = displayTextNodes;
+            wordOffsetsRef.current = displayOffsets;
             setWords(displayWords);
 
             // Determine starting word index
@@ -335,15 +352,35 @@ const RSVPOverlay = ({
                 // Priority 1: a specific word was picked via long-press
                 const targetWord = startWord.text.toLowerCase();
                 const targetNode = startWord.node;
+                const targetOffset = startWord.offset;
                 let foundByNode = false;
                 if (targetNode) {
+                    // Land on the word that was actually pressed. Matching the
+                    // node alone took its FIRST word, so long-pressing halfway
+                    // down a paragraph rewound to the top of it.
+                    let firstInNode = -1;
+                    let bestByOffset = -1;
+                    let bestDelta = Infinity;
                     for (let i = 0; i < displayTextNodes.length; i++) {
                         const tn = displayTextNodes[i];
-                        if (tn === targetNode || tn?.parentElement === targetNode) {
-                            startIdx = i;
-                            foundByNode = true;
-                            break;
+                        const exact = tn === targetNode;
+                        if (!exact && tn?.parentElement !== targetNode) continue;
+                        if (firstInNode === -1) firstInNode = i;
+                        // Offsets only mean anything inside the node they were
+                        // measured in. The parentElement branch can span several
+                        // sibling text nodes, so it cannot use them.
+                        if (exact && typeof targetOffset === 'number') {
+                            const delta = Math.abs(displayOffsets[i] - targetOffset);
+                            if (delta < bestDelta) {
+                                bestDelta = delta;
+                                bestByOffset = i;
+                            }
                         }
+                    }
+                    const picked = bestByOffset !== -1 ? bestByOffset : firstInNode;
+                    if (picked !== -1) {
+                        startIdx = picked;
+                        foundByNode = true;
                     }
                 }
                 if (!foundByNode) {
@@ -418,11 +455,14 @@ const RSVPOverlay = ({
                 return;
             }
 
-            const { displayWords, displayElements, displayTextNodes, imageStops } =
+            const { displayWords, displayOffsets, displayElements, displayTextNodes, imageStops } =
                 extractWordsFromContents(contents);
 
             imageStopPointsRef.current = imageStops;
-            setImageStopIndex(imageStops.length > 0 ? imageStops[0].wordIndex : -1);
+            // Dismissals are indexed by word position, which restarts at 0 in a
+            // new section -- carrying them over would silently skip its images.
+            dismissedStopsRef.current = new Set();
+            setActiveStop(null);
 
             if (displayWords.length === 0) {
                 // Empty section (full-page image, nav doc, …) — skip to the next
@@ -434,6 +474,7 @@ const RSVPOverlay = ({
             wordsRef.current = displayWords;
             wordElementsRef.current = displayElements;
             textNodesRef.current = displayTextNodes;
+            wordOffsetsRef.current = displayOffsets;
             setWords(displayWords);
             setCurrentIndex(0);
             setStoppedAtImage(false);
@@ -443,7 +484,8 @@ const RSVPOverlay = ({
             // Take a brief breath at the chapter boundary.
             chapterPauseRef.current = true;
             setChapterBreak(true);
-            setTimeout(() => setChapterBreak(false), CHAPTER_PAUSE_MS);
+            clearTimeout(chapterBreakTimerRef.current);
+            chapterBreakTimerRef.current = setTimeout(() => setChapterBreak(false), CHAPTER_PAUSE_MS);
 
             console.log('RSVP advanced to next chapter:', displayWords.length, 'words');
         } catch (err) {
@@ -507,6 +549,24 @@ const RSVPOverlay = ({
         return seconds;
     }, [words.length, currentIndex, wpm]);
 
+    // The first image stop crossed in moving from `from` to `to`, ignoring any
+    // the reader has already dismissed. Derived from the actual position every
+    // time it is asked, so there is no pointer left to go stale.
+    const findCrossedStop = useCallback((from, to) => (
+        imageStopPointsRef.current.find(
+            (sp) => sp.wordIndex > from
+                && sp.wordIndex <= to
+                && !dismissedStopsRef.current.has(sp.wordIndex)
+        ) || null
+    ), []);
+
+    const pauseAtStop = useCallback((stop) => {
+        setIsPlaying(false);
+        setStoppedAtImage(true);
+        setActiveStop(stop);
+        setCurrentImageSrc(stop.src || null);
+    }, []);
+
     // Schedule next word with variable delay
     const scheduleNextWord = useCallback(() => {
         if (timerRef.current) {
@@ -522,33 +582,28 @@ const RSVPOverlay = ({
         }
 
         timerRef.current = setTimeout(() => {
-            setCurrentIndex((prev) => {
-                const next = prev + 1;
+            // Decided out here, not inside a setCurrentIndex updater. Updaters
+            // must be pure -- pausing and setting the image from inside one made
+            // React fire those effects twice under StrictMode. currentIndex is a
+            // dependency of this callback, so reading it directly is current.
+            const prev = currentIndex;
+            const next = prev + 1;
 
-                // Check if we hit an image stop
-                if (imageStopIndex >= 0 && next >= imageStopIndex) {
-                    setIsPlaying(false);
-                    setStoppedAtImage(true);
-                    // Find the matching image stop point to get its src
-                    const stopPoint = imageStopPointsRef.current.find(
-                        sp => sp.wordIndex === imageStopIndex
-                    );
-                    if (stopPoint?.src) {
-                        setCurrentImageSrc(stopPoint.src);
-                    }
-                    return prev;
-                }
+            const stop = findCrossedStop(prev, next);
+            if (stop) {
+                pauseAtStop(stop);
+                return;
+            }
 
-                // Reached end of current chapter — stream into the next section
-                if (next >= wordsRef.current.length) {
-                    loadNextSection();
-                    return prev;
-                }
+            // Reached end of current chapter — stream into the next section
+            if (next >= wordsRef.current.length) {
+                loadNextSection();
+                return;
+            }
 
-                return next;
-            });
+            setCurrentIndex(next);
         }, delay);
-    }, [currentIndex, getWordDelay, imageStopIndex, loadNextSection]);
+    }, [currentIndex, getWordDelay, loadNextSection, findCrossedStop, pauseAtStop]);
 
     // Play/pause loop
     useEffect(() => {
@@ -596,10 +651,19 @@ const RSVPOverlay = ({
                     const doc = textNode.ownerDocument;
                     const range = doc.createRange();
                     const textContent = textNode.textContent;
-                    const wordIndex = textContent.indexOf(word);
-                    if (wordIndex >= 0) {
-                        range.setStart(textNode, wordIndex);
-                        range.setEnd(textNode, wordIndex + word.length);
+                    // The offset recorded when this word was tokenised -- the
+                    // occurrence the reader is actually on. indexOf(word) found
+                    // the first one in the node, so any repeated word ("the",
+                    // "and", a character's name) saved a position earlier in the
+                    // paragraph than where reading had reached.
+                    const offset = wordOffsetsRef.current[currentIndex];
+                    if (
+                        offset != null
+                        && offset + word.length <= textContent.length
+                        && textContent.startsWith(word, offset)
+                    ) {
+                        range.setStart(textNode, offset);
+                        range.setEnd(textNode, offset + word.length);
                         // Generate CFI from the range
                         const wordCfi = contents[0].cfiFromRange(range);
                         if (wordCfi) {
@@ -634,8 +698,19 @@ const RSVPOverlay = ({
     }, []);
 
     const skipForward = useCallback(() => {
-        setCurrentIndex((prev) => Math.min(words.length - 1, prev + 10));
-    }, [words.length]);
+        const target = Math.min(words.length - 1, currentIndex + 10);
+        // A ten-word jump can vault a full-page illustration. The old check
+        // (next >= pointer) meant to catch that overshoot but did it from the
+        // playback tick, where a passed stop then matched forever and froze
+        // playback. Checking the span actually crossed keeps the intent.
+        const stop = findCrossedStop(currentIndex, target);
+        if (stop) {
+            setCurrentIndex(Math.max(currentIndex, stop.wordIndex - 1));
+            pauseAtStop(stop);
+            return;
+        }
+        setCurrentIndex(target);
+    }, [words.length, currentIndex, findCrossedStop, pauseAtStop]);
 
     const restart = useCallback(() => {
         setCurrentIndex(0);
@@ -672,7 +747,8 @@ const RSVPOverlay = ({
             }
 
             // Wait for the new content to render, then re-extract visible page
-            setTimeout(() => {
+            clearTimeout(pageNavTimerRef.current);
+            pageNavTimerRef.current = setTimeout(() => {
                 extractText();
             }, 300);
         } catch (err) {
@@ -706,7 +782,8 @@ const RSVPOverlay = ({
             }
 
             // Wait for the new content to render, then re-extract visible page
-            setTimeout(() => {
+            clearTimeout(pageNavTimerRef.current);
+            pageNavTimerRef.current = setTimeout(() => {
                 extractText();
             }, 300);
         } catch (err) {
@@ -733,15 +810,13 @@ const RSVPOverlay = ({
 
     // Handle showing the image in a preview modal
     const handleShowImage = useCallback(() => {
-        // Find the current image stop point to get its src
-        const stopPoint = imageStopPointsRef.current.find(
-            sp => sp.wordIndex === imageStopIndex
-        );
-        if (stopPoint?.src) {
-            setCurrentImageSrc(stopPoint.src);
+        // The stop we paused on already carries its src -- no lookup, and
+        // nothing to go stale.
+        if (activeStop?.src) {
+            setCurrentImageSrc(activeStop.src);
         }
         setShowImagePreview(true);
-    }, [imageStopIndex]);
+    }, [activeStop]);
 
     // Handle closing the image preview modal
     const handleCloseImagePreview = useCallback(() => {
@@ -750,25 +825,32 @@ const RSVPOverlay = ({
 
     // Handle continuing past the image (skip it and resume reading)
     const handleContinuePastImage = useCallback(() => {
+        // Mark this one seen instead of advancing a pointer to "the next
+        // image". The tick finds the next stop by position anyway, so there is
+        // no pointer left to fall out of step with where the reader is.
+        if (activeStop) {
+            dismissedStopsRef.current.add(activeStop.wordIndex);
+        }
+        setActiveStop(null);
         setStoppedAtImage(false);
         setCurrentImageSrc(null);
         setShowImagePreview(false);
 
-        // Find the next image stop point after the current one
-        const currentStopIdx = imageStopPointsRef.current.findIndex(
-            sp => sp.wordIndex === imageStopIndex
-        );
-        const nextStop = imageStopPointsRef.current[currentStopIdx + 1];
-
-        if (nextStop) {
-            setImageStopIndex(nextStop.wordIndex);
-        } else {
-            setImageStopIndex(-1); // No more images
-        }
-
         // Resume playing
         setIsPlaying(true);
-    }, [imageStopIndex]);
+    }, [activeStop]);
+
+    // Reader renders this overlay unconditionally and it merely returns null
+    // when closed, so closing unmounts nothing and no cleanup runs. Timers
+    // scheduled just before a close would otherwise still fire: the page-nav
+    // one re-extracts text into a closed overlay 300ms later, at exactly the
+    // moment the Reader is re-displaying the saved position.
+    useEffect(() => {
+        if (isOpen) return;
+        clearTimeout(timerRef.current);
+        clearTimeout(chapterBreakTimerRef.current);
+        clearTimeout(pageNavTimerRef.current);
+    }, [isOpen]);
 
     // Keyboard shortcuts
     useEffect(() => {

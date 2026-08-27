@@ -41,9 +41,24 @@ const Reader = () => {
     const bookRef = useRef(null);
     const isNavigatingRef = useRef(false);
     const lastLocationRef = useRef(null);
-    // True while a fold/fullscreen re-layout is re-displaying. Resize emits its
-    // own 'relocated' events; we ignore them so they can't drift the anchor.
-    const isResizingRef = useRef(false);
+    // Reading position is state we own, not a reading of wherever epub.js
+    // happens to have landed. Every reflow WE initiate -- fold/fullscreen
+    // resize, a typography change, a programmatic restore -- makes epub.js emit
+    // 'relocated' for a position the reader never navigated to, and
+    // display(cfi) settles on the page START, which after a reflow sits earlier
+    // than the anchor. Left unguarded, each one walks saved progress backward.
+    //
+    // A depth counter rather than a boolean: resize bursts and typography
+    // changes overlap, and with a boolean whichever finishes first clears the
+    // flag while the other is still re-laying out. Non-zero means "a reflow we
+    // asked for is in flight, so relocated is noise, not navigation".
+    const reflowDepthRef = useRef(0);
+    const beginReflow = useCallback(() => {
+        reflowDepthRef.current += 1;
+    }, []);
+    const endReflow = useCallback(() => {
+        reflowDepthRef.current = Math.max(0, reflowDepthRef.current - 1);
+    }, []);
 
     // State
     const [book, setBook] = useState(null);
@@ -290,11 +305,10 @@ const Reader = () => {
 
                 // Handle location changes
                 rendition.on('relocated', (location) => {
-                    // Ignore relocations caused by our own fold/fullscreen
-                    // re-display — otherwise the anchor drifts backward each
-                    // time because display(cfi) lands on a page that starts
-                    // slightly before the cfi.
-                    if (isResizingRef.current) {
+                    // Only the reader moves the anchor. Anything emitted while
+                    // a reflow we initiated is in flight is a consequence of
+                    // that reflow, not navigation, so it is dropped.
+                    if (reflowDepthRef.current > 0) {
                         isNavigatingRef.current = false;
                         return;
                     }
@@ -350,6 +364,12 @@ const Reader = () => {
                 // Priority: savedCfi (from mode switch) > book.lastRead (from DB)
                 const startLocation = savedCfi || book.lastRead;
                 if (startLocation) {
+                    // Deliberately NOT wrapped in beginReflow/endReflow. This
+                    // first relocated is what seeds chapter, progress and page
+                    // count -- suppress it and the reader opens blank. It does
+                    // floor a mid-page cfi to the page start, but that settles
+                    // after one open rather than compounding, so it is left as
+                    // the one place epub.js is allowed to define the position.
                     await rendition.display(startLocation);
 
                     // Flash the resumed position after content is rendered
@@ -424,30 +444,44 @@ const Reader = () => {
         // lastLocationRef and land us on the wrong (often previous) page.
         let resizeTimeout;
         let pendingResizeCfi = null;
+        let resizeReflowOpen = false;
         const handleResize = () => {
             if (pendingResizeCfi == null) {
                 pendingResizeCfi = lastLocationRef.current;
+                // Guard from the FIRST event of the burst, not after the
+                // debounce settles. epub.js registers its own throttled resize
+                // listener and reflows on its schedule -- by the time a 300ms
+                // debounce ran, its 'relocated' had already overwritten the
+                // anchor, which is why folding the phone lost your place even
+                // though this handler looked like it was holding the position.
+                resizeReflowOpen = true;
+                beginReflow();
             }
             clearTimeout(resizeTimeout);
             resizeTimeout = setTimeout(async () => {
                 const cfi = pendingResizeCfi;
                 pendingResizeCfi = null;
-                if (renditionRef.current && cfi) {
-                    // Hold the anchor steady across the whole re-layout so the
-                    // resize's own relocations can't move it (see relocated guard).
-                    isResizingRef.current = true;
-                    renditionRef.current.resize('100%', '100%');
-                    try {
-                        await renditionRef.current.display(cfi);
-                    } catch { /* ignore */ }
-                    const loc = renditionRef.current.currentLocation?.();
-                    if (loc) updatePageCount(loc, true); // layout changed
-                    // Flash the word/line that was at the top so you can see
-                    // where you were after the fold/unfold or fullscreen toggle.
-                    setTimeout(() => {
+                try {
+                    if (renditionRef.current && cfi) {
+                        renditionRef.current.resize('100%', '100%');
+                        try {
+                            await renditionRef.current.display(cfi);
+                        } catch { /* ignore */ }
+                        const loc = renditionRef.current.currentLocation?.();
+                        if (loc) updatePageCount(loc, true); // layout changed
+                        // Flash the word/line that was at the top so you can see
+                        // where you were after the fold/unfold or fullscreen toggle.
+                        await new Promise((resolve) => setTimeout(resolve, 150));
                         flashCfi(cfi);
-                        isResizingRef.current = false;
-                    }, 150);
+                    }
+                } finally {
+                    // Balanced on every path, including the no-rendition and
+                    // no-cfi ones. A leaked increment would silently stop
+                    // saving progress for the rest of the session.
+                    if (resizeReflowOpen) {
+                        resizeReflowOpen = false;
+                        endReflow();
+                    }
                 }
             }, 300); // Debounce to ride out the fold/fullscreen animation
         };
@@ -457,6 +491,11 @@ const Reader = () => {
         return () => {
             window.removeEventListener('resize', handleResize);
             clearTimeout(resizeTimeout);
+            // The debounced tail never runs, so close the guard it opened.
+            if (resizeReflowOpen) {
+                resizeReflowOpen = false;
+                endReflow();
+            }
             if (uiAutoHideTimerRef.current) {
                 clearTimeout(uiAutoHideTimerRef.current);
             }
@@ -516,13 +555,30 @@ const Reader = () => {
         // breaks the paginated layout. Re-calibrate the page total afterwards
         // so "page X / Y" reflects the new typography.
         if (lastLocationRef.current) {
-            rendition.display(lastLocationRef.current).then(() => {
-                const loc = rendition.currentLocation?.();
-                if (loc) updatePageCount(loc, true);
-            });
+            // Re-paginating is not navigation. Unguarded, every font-size or
+            // margin nudge saved whatever page start the reflow settled on, and
+            // the book crept backward one adjustment at a time.
+            const anchor = lastLocationRef.current;
+            beginReflow();
+            rendition.display(anchor)
+                .then(() => {
+                    const loc = rendition.currentLocation?.();
+                    if (loc) updatePageCount(loc, true);
+                })
+                .catch(() => { /* ignore */ })
+                .finally(() => {
+                    // Held briefly past the promise: epub.js queues its location
+                    // report, so 'relocated' can land a tick after display()
+                    // resolves. Releasing immediately would let exactly the
+                    // event we are guarding against through.
+                    setTimeout(() => {
+                        lastLocationRef.current = anchor;
+                        endReflow();
+                    }, 150);
+                });
         }
 
-    }, [settings, getEpubStyles, themeColors, updatePageCount]);
+    }, [settings, getEpubStyles, themeColors, updatePageCount, beginReflow, endReflow]);
 
     // Navigation functions with debouncing
     const goNext = useCallback(() => {
@@ -618,6 +674,7 @@ const Reader = () => {
             // Try to get the clicked word
             let clickedWord = '';
             let clickedNode = null;
+            let clickedOffset = null;
 
             if (selection && selection.rangeCount > 0) {
                 // Expand selection to word
@@ -626,6 +683,12 @@ const Reader = () => {
                 clickedWord = selection.toString().trim();
                 if (selection.anchorNode) {
                     clickedNode = selection.anchorNode;
+                    // Where in the node the word begins. The anchor stays put
+                    // while 'extend' moves the focus, so this is the word start.
+                    // Without it the overlay can only match the text node, and
+                    // long-pressing the fifth word of a paragraph starts reading
+                    // from that paragraph's first word instead.
+                    clickedOffset = selection.anchorOffset;
                 }
                 selection.removeAllRanges();
             }
@@ -637,7 +700,7 @@ const Reader = () => {
             }
 
             if (clickedWord) {
-                setRsvpStartWord({ text: clickedWord, node: clickedNode });
+                setRsvpStartWord({ text: clickedWord, node: clickedNode, offset: clickedOffset });
                 setWordSelectMode(false);
                 setShowRSVP(true);
                 setShowUI(false);
@@ -666,18 +729,37 @@ const Reader = () => {
         if (cfi) {
             let pct;
             try { pct = bookRef.current?.locations?.percentageFromCfi?.(cfi); } catch { /* ignore */ }
-            renditionRef.current.display(cfi).then(() => {
-                // Re-assert the exact word position: display() emits 'relocated',
-                // which otherwise saves the page-start CFI and loses the word.
-                lastLocationRef.current = cfi;
-                saveProgress(parseInt(bookId), { cfi, percentage: pct ?? progress });
-                highlightLastWord(wordInfo);
-            });
+            // display() emits 'relocated' reporting the page START, which loses
+            // the exact word. Re-asserting the cfi afterwards was a race: the
+            // event can arrive after the promise resolves, and then it won.
+            // Suppressing it instead makes the save below the only writer.
+            beginReflow();
+            renditionRef.current.display(cfi)
+                .then(() => {
+                    lastLocationRef.current = cfi;
+                    saveProgress(parseInt(bookId), { cfi, percentage: pct ?? progress });
+                    // relocated is suppressed, so drive the UI ourselves rather
+                    // than leaving the bar parked at the pre-RSVP position.
+                    if (pct !== undefined && pct !== null) setProgress(pct);
+                    const loc = renditionRef.current?.currentLocation?.();
+                    if (loc) {
+                        setCurrentLocation(loc);
+                        if (loc.start?.href) setCurrentChapter(loc.start.href);
+                        updatePageCount(loc);
+                    }
+                    highlightLastWord(wordInfo);
+                })
+                .catch(() => { /* ignore */ })
+                .finally(() => {
+                    setTimeout(endReflow, 150);
+                });
         } else if (wordInfo?.parent) {
             // Fallback: just highlight without navigation
             highlightLastWord(wordInfo);
         }
-    }, [bookId, progress]);
+        // highlightLastWord is deliberately absent: it is declared below this
+        // callback, so naming it here would hit the TDZ during render.
+    }, [bookId, progress, beginReflow, endReflow, updatePageCount]);
 
     // Helper function to highlight the last word
     const highlightLastWord = useCallback((wordInfo) => {

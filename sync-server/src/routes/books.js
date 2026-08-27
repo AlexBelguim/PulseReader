@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
+import { computeFileHash } from '../scanner.js';
 
 export function booksRouter(db, booksDir) {
     const router = Router();
@@ -210,10 +211,23 @@ export function booksRouter(db, booksDir) {
                 coverPath = path.relative(booksDir, req.files.cover[0].path);
             }
 
+            // Hash at upload time so the row can be recognised again if the
+            // file is later renamed on disk. Rows inserted without one are
+            // invisible to the scanner's rename matching until a scan
+            // backfills the hash, and a rename inside that window still costs
+            // the reader their progress.
+            let fileHash = null;
+            try {
+                fileHash = computeFileHash(epubFile.path);
+            } catch {
+                // Not worth failing an otherwise good upload over; the next
+                // scan fills it in.
+            }
+
             db.prepare(`
-                INSERT INTO books (id, title, author, series, filename, filepath, cover_path, file_size)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(id, title, author, series, epubFile.originalname, relativePath, coverPath, epubFile.size);
+                INSERT INTO books (id, title, author, series, filename, filepath, cover_path, file_size, file_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(id, title, author, series, epubFile.originalname, relativePath, coverPath, epubFile.size, fileHash);
 
             const book = db.prepare('SELECT * FROM books WHERE id = ?').get(id);
             res.status(201).json(book);
