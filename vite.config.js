@@ -9,7 +9,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'masked-icon.svg'],
+      includeAssets: ['favicon.svg', 'favicon-32.png', 'favicon-16.png', 'apple-touch-icon.png', 'masked-icon.svg'],
       manifest: {
         name: 'PulseReader',
         short_name: 'Pulse',
@@ -29,10 +29,14 @@ export default defineConfig({
             type: 'image/png'
           },
           {
-            src: 'pwa-512x512.png',
+            // A maskable icon needs its own file: Android crops to a circle or
+            // squircle, and the standard icon's mark runs too close to the
+            // edge to survive that. This one is full-bleed with the reticle
+            // held inside the centre 80% safe zone.
+            src: 'pwa-maskable-512x512.png',
             sizes: '512x512',
             type: 'image/png',
-            purpose: 'any maskable'
+            purpose: 'maskable'
           }
         ]
       },

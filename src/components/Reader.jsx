@@ -770,7 +770,14 @@ const Reader = () => {
     // Keyboard navigation
     useEffect(() => {
         const handleKeyDown = (e) => {
-            if (showSettings || showTOC) return;
+            // showRSVP belongs here too. Without it, arrow keys inside the RSVP
+            // overlay paginate the book underneath: each skip turns the hidden
+            // page, fires an unguarded relocated that overwrites saved progress,
+            // and once the hidden rendition crosses a section boundary the
+            // overlay's next-section load reads the drifted index and skips a
+            // chapter. Escape was worse -- it navigated away while the overlay
+            // was still awaiting its closing display(), unmounting mid-save.
+            if (showSettings || showTOC || showRSVP) return;
 
             switch (e.key) {
                 case 'ArrowRight':
@@ -791,7 +798,7 @@ const Reader = () => {
 
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [goNext, goPrev, navigate, showSettings, showTOC]);
+    }, [goNext, goPrev, navigate, showSettings, showTOC, showRSVP]);
 
     // Core tap zone handler - used by both outer div clicks and iframe clicks
     // Kindle-style: tap left = prev, tap right = next, tap center = toggle UI

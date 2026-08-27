@@ -131,10 +131,15 @@ export async function downloadCover(bookId) {
  */
 export async function uploadBook(epubData, metadata) {
     const formData = new FormData();
-    formData.append('epub', new Blob([epubData], { type: 'application/epub+zip' }), metadata.filename || 'book.epub');
+    // Text fields MUST be appended before the file. Multer streams the parts in
+    // order and its destination callback reads req.body.series to choose the
+    // series folder -- with the epub first, req.body is still empty at that
+    // point and every upload landed in books/Uncategorized/ regardless of
+    // series.
     if (metadata.title) formData.append('title', metadata.title);
     if (metadata.author) formData.append('author', metadata.author);
     if (metadata.series) formData.append('series', metadata.series);
+    formData.append('epub', new Blob([epubData], { type: 'application/epub+zip' }), metadata.filename || 'book.epub');
     if (metadata.cover) formData.append('cover', metadata.cover, 'cover.jpg');
 
     const response = await syncFetch('/api/books', {
@@ -233,6 +238,20 @@ export async function pushProgress(localBooks, updateBookFn) {
             if (!localBook.syncId && updateBookFn) {
                 try { await updateBookFn(localBook.id, { syncId: serverBook.id }); } catch { /* ignore */ }
             }
+            // Only push books this device actually knows something about.
+            //
+            // The server applies these with forceUpsert, which overwrites
+            // unconditionally -- that is the point of Push. But a book this
+            // device has never opened has no progress row at all (addBook only
+            // seeds one when there is something to seed), so it arrives here as
+            // progress undefined / lastRead undefined and would be sent as
+            // "0%, no location, unread", silently erasing a position another
+            // device set. Pushing a genuine reset still works: a book you have
+            // opened has a lastRead, so it passes this guard.
+            const hasLocalState =
+                (localBook.progress ?? 0) > 0 || localBook.isRead || !!localBook.lastRead;
+            if (!hasLocalState) continue;
+
             updates.push({
                 book_id: serverBook.id,
                 location: localBook.lastRead || null,
@@ -500,11 +519,35 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
         }
 
         // --- Step 3: Handle unmatched local books ---
+        //
+        // Deleting here is the destructive half of sync: deleteBookFn drops the
+        // epub blob, the progress record and the locations cache. An empty (or
+        // suspiciously small) server list is far more likely to mean the server
+        // could not see its books volume than that the user deleted their
+        // library, so refuse to mirror that emptiness. Without this, one boot
+        // scan against an unmounted volume plus one Full Sync erases every
+        // reading position on the device too.
+        const previouslySynced = localBooks.filter((b) => b.syncId).length;
+        const deletionsWouldBe = localBooks.filter(
+            (b) => b.syncId && !matchedLocalIds.has(b.id)
+        ).length;
+        const wipingEverything = previouslySynced > 0 && deletionsWouldBe === previouslySynced;
+        const skipDeletions = serverBooks.length === 0 || wipingEverything;
+
+        if (skipDeletions && deletionsWouldBe > 0) {
+            results.errors.push(
+                `Skipped removing ${deletionsWouldBe} local book(s): the server reported ` +
+                `${serverBooks.length} book(s), which would have deleted everything previously ` +
+                'synced. Check the server can see its books folder, then sync again.'
+            );
+        }
+
         for (const localBook of localBooks) {
             if (matchedLocalIds.has(localBook.id)) continue;
 
             if (localBook.syncId) {
                 // This book was previously synced but no longer exists on server → delete locally
+                if (skipDeletions) continue;
                 try {
                     await deleteBookFn(localBook.id);
                     results.deleted++;

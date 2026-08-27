@@ -129,10 +129,19 @@ export const getAllProgress = async () => {
 
 export const saveProgress = async (bookId, { cfi, percentage, isRead, updatedAt } = {}) => {
     const db = await initDB();
-    const existing = (await db.get('progress', bookId)) || { bookId };
+    // Base on getProgress rather than a raw store read, so the pre-v4 fallback
+    // (position still on the book record) is part of the merge. Reading only
+    // the progress store meant marking a legacy book read wrote cfi:null over a
+    // position that was sitting right there on the record.
+    const existing = (await getProgress(bookId)) || { bookId };
     const next = {
         bookId,
-        cfi: cfi !== undefined ? cfi : existing.cfi ?? null,
+        // null is "no position to report", not "the user is at the start".
+        // Callers pass it routinely -- a read-flag toggle, a sync pull of a row
+        // whose location is NULL -- and storing it destroys a real CFI. There is
+        // no caller that clears a position on purpose, so absence never wins
+        // over a value we already have.
+        cfi: cfi !== undefined && cfi !== null ? cfi : existing.cfi ?? null,
         percentage: percentage !== undefined ? percentage : existing.percentage ?? 0,
         isRead: isRead !== undefined ? isRead : existing.isRead ?? false,
         updatedAt: updatedAt || new Date().toISOString(),

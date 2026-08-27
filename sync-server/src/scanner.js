@@ -172,9 +172,33 @@ export async function scanBooksFolder(db, booksDir) {
         }
     }
 
-    // Remove books that no longer exist on disk
+    // Remove books that no longer exist on disk.
+    //
+    // Guarded, because "the scan saw nothing" is not the same as "the user
+    // deleted their library". The early return above only fires when booksDir
+    // does not exist, and an existing-but-empty directory is exactly what a
+    // failed bind mount looks like -- so without this floor one boot scan
+    // against an unmounted volume deletes every row, and reading_progress with
+    // it. Books can be recovered by rescanning; reading positions cannot be
+    // recovered from anything.
+    if (seenPaths.size === 0 && existingByPath.size > 0) {
+        console.warn(
+            `[scanner] Found 0 books in ${booksDir} but the database holds ${existingByPath.size}. ` +
+            'Refusing to reconcile -- this usually means the books volume is not mounted. ' +
+            'No rows were deleted.'
+        );
+        return count;
+    }
+
     for (const [filepath, book] of existingByPath) {
         if (!seenPaths.has(filepath)) {
+            // Progress goes with the book, matching the ON DELETE CASCADE the
+            // schema declares. (That cascade does not actually fire -- SQLite
+            // leaves foreign_keys off unless asked -- so this delete is what
+            // enforces it.) Keeping the row instead would not help: a file that
+            // comes back is re-inserted under a fresh uuid, so the old progress
+            // could never be re-linked to it. The floor above is what protects
+            // the library; this branch is for a single genuinely deleted book.
             db.prepare('DELETE FROM books WHERE id = ?').run(book.id);
             db.prepare('DELETE FROM reading_progress WHERE book_id = ?').run(book.id);
         }

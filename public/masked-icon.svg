@@ -1,0 +1,6 @@
+<svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="PulseReader">
+  <!-- Safari pinned-tab mask: a single flat silhouette, no colour and no
+       ground. Safari fills it with the user's chosen tint, so anything
+       relying on the red/grey contrast has to be merged into one shape. -->
+  <path d="M22 8h4v7h-4z M10 21h28v6H10z M22 33h4v7h-4z"/>
+</svg>

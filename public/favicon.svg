@@ -1,0 +1,9 @@
+<svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="PulseReader">
+  <!-- The RSVP focus reticle: guide marks above and below the fixation point,
+       with the word you are on held between them. Red is --color-primary
+       (#ff4b4b), the same accent used for the ORP letter in the reader. -->
+  <rect width="48" height="48" rx="11" fill="#000000"/>
+  <rect x="22" y="8"  width="4"  height="7" rx="2" fill="#ff4b4b"/>
+  <rect x="22" y="33" width="4"  height="7" rx="2" fill="#ff4b4b"/>
+  <rect x="10" y="21" width="28" height="6" rx="3" fill="#e0e0e0" opacity=".8"/>
+</svg>
