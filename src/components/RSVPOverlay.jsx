@@ -29,11 +29,9 @@ const RSVPOverlay = ({
     isOpen,
     onClose,
     rendition,
-    startCfi,
     startWord,
     wpm: initialWpm = 300,
     onWpmChange,
-    onStopAtImage,
     onCloseWithPosition,
 }) => {
     // State
@@ -111,7 +109,7 @@ const RSVPOverlay = ({
 
         // Name/proper noun multiplier (capitalized words not at start of sentence)
         if (nameMultiplier > 1 && !prevWordEndedSentenceRef.current) {
-            const cleanWord = word.replace(/^["""''([\[{]/, ''); // strip leading quotes/brackets
+            const cleanWord = word.replace(/^["""''([[{]/, ''); // strip leading quotes/brackets
             if (cleanWord.length > 0 && cleanWord[0] === cleanWord[0].toUpperCase() && cleanWord[0] !== cleanWord[0].toLowerCase()) {
                 multiplier *= nameMultiplier;
             }

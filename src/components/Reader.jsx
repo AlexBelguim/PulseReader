@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import ePub from 'epubjs';
+import ePub, { EpubCFI } from 'epubjs';
 import {
     ArrowLeft,
     Settings,
@@ -66,7 +66,7 @@ const Reader = () => {
     const [error, setError] = useState(null);
     const [chapters, setChapters] = useState([]);
     const [currentChapter, setCurrentChapter] = useState('');
-    const [currentLocation, setCurrentLocation] = useState(null);
+    const [, setCurrentLocation] = useState(null);
     const [progress, setProgress] = useState(0);
     const [locationsReady, setLocationsReady] = useState(false);
     const [currentPage, setCurrentPage] = useState(0);
@@ -105,39 +105,87 @@ const Reader = () => {
     getEpubStylesRef.current = getEpubStyles;
     const styleSigRef = useRef(computeStyleSig(settings));
 
-    // Fraction of the whole book that one screen page spans. Calibrated from
-    // the visible span once per layout (open / font change / fold) and frozen
-    // while reading, so the page total stays stable instead of jumping per page.
+    // Fraction of the whole book that one screen page spans. Calibrated once
+    // per layout (open / font change / fold) and frozen while reading, so the
+    // page total stays stable instead of jumping per page. pageFractionGoodRef
+    // says the fraction came from a section long enough to trust; until then
+    // every relocated retries, so opening on a cover page self-corrects.
     const pageFractionRef = useRef(0);
+    const pageFractionGoodRef = useRef(false);
+    // spine index -> { first, count } of that section's location entries.
+    const sectionLocsRef = useRef(new Map());
+
+    // Where a spine section sits in the locations list. Locations are sorted,
+    // so binary-search on the spine step (parsing only log N cfis); cached
+    // because it is content-only and never changes for an opened book.
+    const sectionLocations = useCallback((index) => {
+        const cache = sectionLocsRef.current;
+        if (cache.has(index)) return cache.get(index);
+        const list = bookRef.current?.locations?._locations;
+        if (!Array.isArray(list) || !list.length) return null;
+        const lowerBound = (spine) => {
+            let lo = 0, hi = list.length;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (new EpubCFI(list[mid]).spinePos < spine) lo = mid + 1;
+                else hi = mid;
+            }
+            return lo;
+        };
+        const first = lowerBound(index);
+        const info = { first, count: lowerBound(index + 1) - first };
+        cache.set(index, info);
+        return info;
+    }, []);
 
     // Derive a screen-accurate "page X / Y". Pass recalibrate=true on a layout
     // change so the fraction (and therefore the total) is re-measured for the
     // new font size / margins / viewport; otherwise only the current page moves.
+    //
+    // Locations are ~1000-character chunks, and a phone page often holds less
+    // than that -- so the visible span's start/end percentages were usually
+    // identical (no total at all) or one chunk apart (total == chunk count,
+    // far too low). Instead use the current section: epub.js knows exactly how
+    // many screen pages it laid the section out into, and the locations know
+    // what share of the book the section is.
     const updatePageCount = useCallback((location, recalibrate = false) => {
         try {
             const loc = bookRef.current?.locations;
-            if (!loc || !loc.length()) return;
-            const startCfi = location?.start?.cfi;
-            if (!startCfi) return;
-            const sPct = loc.percentageFromCfi(startCfi);
+            const totalLocs = loc?.length?.();
+            if (!totalLocs) return;
+            const index = location?.start?.index;
+            const displayed = location?.start?.displayed;
+            if (index == null || !(displayed?.total > 0)) return;
+            const sec = sectionLocations(index);
+            if (!sec) return;
 
-            if (recalibrate || !(pageFractionRef.current > 0)) {
-                const endCfi = location?.end?.cfi;
-                const ePct = endCfi ? loc.percentageFromCfi(endCfi) : sPct;
-                const frac = ePct - sPct;
-                if (frac > 0 && isFinite(frac)) pageFractionRef.current = frac;
+            if (recalibrate) pageFractionGoodRef.current = false;
+            if (!pageFractionGoodRef.current) {
+                // A handful of chunks keeps the +/-1 chunk rounding small;
+                // shorter sections (cover, title page) are too coarse to trust.
+                const trusted = sec.count >= 3;
+                if (trusted || !(pageFractionRef.current > 0)) {
+                    const frac = (sec.count / totalLocs) / displayed.total;
+                    if (frac > 0 && isFinite(frac)) {
+                        pageFractionRef.current = frac;
+                        pageFractionGoodRef.current = trusted;
+                    }
+                }
             }
 
             const frac = pageFractionRef.current;
             if (!(frac > 0)) return;
             const total = Math.max(1, Math.round(1 / frac));
-            const cur = Math.min(total, Math.max(1, Math.round(sPct / frac) + 1));
+            // Pages before this section + the page within it, so each page
+            // turn moves the counter by exactly one inside a section.
+            const before = Math.round((sec.first / totalLocs) / frac);
+            const cur = Math.min(total, Math.max(1, before + (displayed.page || 1)));
             setTotalPages(total);
             setCurrentPage(cur);
         } catch {
             // best-effort — fall back to the percentage display
         }
-    }, []);
+    }, [sectionLocations]);
 
     // Briefly highlight just the first few words at a CFI — used to show
     // "you were here" when resuming a book and after a fold/fullscreen
@@ -218,6 +266,9 @@ const Reader = () => {
                     bookData.lastRead = prog.cfi;
                     bookData.progress = prog.percentage;
                     bookData.isRead = prog.isRead;
+                    // Seed the footer until locations load -- relocated carries
+                    // no percentage before then, so it would read 0%.
+                    setProgress(prog.percentage || 0);
                 }
 
                 setBook(bookData);
@@ -250,6 +301,9 @@ const Reader = () => {
                 }
 
                 setLocationsReady(false);
+                sectionLocsRef.current = new Map();
+                pageFractionRef.current = 0;
+                pageFractionGoodRef.current = false;
 
                 // Create new book instance
                 const epubBook = ePub(book.data);
@@ -349,8 +403,11 @@ const Reader = () => {
                     // Don't handle if in word select mode
                     if (wordSelectModeRef.current) return;
 
-                    // Map iframe coordinates to viewport coordinates
-                    const iframe = viewerRef.current?.querySelector('iframe');
+                    // Map iframe coordinates to viewport coordinates. Use the
+                    // frame the click came from: the continuous (scrolled)
+                    // manager keeps several section iframes alive.
+                    const iframe = e.view?.frameElement
+                        || viewerRef.current?.querySelector('iframe');
                     if (!iframe) return;
 
                     const iframeRect = iframe.getBoundingClientRect();
@@ -603,12 +660,6 @@ const Reader = () => {
         }
     }, []);
 
-    const goToLocation = useCallback((cfi) => {
-        if (renditionRef.current) {
-            renditionRef.current.display(cfi);
-        }
-    }, []);
-
     const handleProgressChange = useCallback((e) => {
         const newProgress = parseFloat(e.target.value);
         if (bookRef.current && bookRef.current.locations && locationsReady) {
@@ -768,7 +819,6 @@ const Reader = () => {
         try {
             // Find the word text in the parent and wrap it with a highlight span
             const parent = wordInfo.parent;
-            const word = wordInfo.originalWord || wordInfo.word;
 
             // Create a highlight effect on the parent element
             parent.style.transition = 'background-color 0.3s, box-shadow 0.3s';
@@ -896,14 +946,18 @@ const Reader = () => {
 
         // clientX/clientY are relative to the viewport
         const x = clientX - rect.left;
+        const y = clientY - rect.top;
         const width = rect.width;
 
         // Check if mobile (narrow screen)
         const isMobile = window.innerWidth < 768;
 
         if (isMobile) {
-            // Mobile Kindle-style: left 30% = prev, right 30% = next, center 40% = toggle UI
-            if (x < width * 0.3) {
+            // Mobile Kindle-style: top strip = toggle UI, then left 30% = prev,
+            // right 30% = next, center 40% = toggle UI
+            if (y < rect.height * 0.2) {
+                setShowUI((prev) => !prev);
+            } else if (x < width * 0.3) {
                 goPrev();
             } else if (x > width * 0.7) {
                 goNext();

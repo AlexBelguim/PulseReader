@@ -2,86 +2,88 @@ import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Minus, Plus, RotateCcw } from 'lucide-react';
 
-const ReaderSettings = ({ isOpen, onClose, settings, updateSetting, resetSettings }) => {
+// Defined outside ReaderSettings so React keeps the same component identity
+// across renders; recreated each render, a slider remounts mid-drag.
 
-    // Dropdown component
-    const Dropdown = ({ label, value, onChange, options }) => (
-        <div className="settings-row">
-            <label className="settings-label">{label}</label>
-            <div className="settings-dropdown-wrapper">
-                <select
-                    className="settings-dropdown"
-                    value={value}
-                    onChange={(e) => onChange(e.target.value)}
-                >
-                    {options.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                            {opt.label}
-                        </option>
-                    ))}
-                </select>
-            </div>
-        </div>
-    );
-
-    // Stepper component (+/-)
-    const Stepper = ({ label, value, onChange, min, max, step, suffix = '' }) => (
-        <div className="settings-row">
-            <label className="settings-label">{label}</label>
-            <div className="settings-stepper">
-                <button
-                    className="stepper-btn"
-                    onClick={() => onChange(Math.max(min, value - step))}
-                    disabled={value <= min}
-                >
-                    <Minus size={18} />
-                </button>
-                <span className="stepper-value">{value}{suffix}</span>
-                <button
-                    className="stepper-btn"
-                    onClick={() => onChange(Math.min(max, value + step))}
-                    disabled={value >= max}
-                >
-                    <Plus size={18} />
-                </button>
-            </div>
-        </div>
-    );
-
-    // Slider component
-    const Slider = ({ label, value, onChange, min, max, step }) => (
-        <div className="settings-row">
-            <label className="settings-label">{label}</label>
-            <div className="settings-slider-wrapper">
-                <input
-                    type="range"
-                    className="settings-slider"
-                    min={min}
-                    max={max}
-                    step={step}
-                    value={value}
-                    onChange={(e) => onChange(parseInt(e.target.value))}
-                />
-                <span className="slider-value">{value}</span>
-            </div>
-        </div>
-    );
-
-    // Toggle component
-    const Toggle = ({ label, value, onChange }) => (
-        <div className="settings-row">
-            <label className="settings-label">{label}</label>
-            <button
-                className={`settings-toggle ${value ? 'active' : ''}`}
-                onClick={() => onChange(!value)}
+// Dropdown component
+const Dropdown = ({ label, value, onChange, options }) => (
+    <div className="settings-row">
+        <label className="settings-label">{label}</label>
+        <div className="settings-dropdown-wrapper">
+            <select
+                className="settings-dropdown"
+                value={value}
+                onChange={(e) => onChange(e.target.value)}
             >
-                <span className="toggle-track">
-                    <span className="toggle-thumb" />
-                </span>
+                {options.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                    </option>
+                ))}
+            </select>
+        </div>
+    </div>
+);
+
+// Stepper component (+/-)
+const Stepper = ({ label, value, onChange, min, max, step, suffix = '' }) => (
+    <div className="settings-row">
+        <label className="settings-label">{label}</label>
+        <div className="settings-stepper">
+            <button
+                className="stepper-btn"
+                onClick={() => onChange(Math.max(min, value - step))}
+                disabled={value <= min}
+            >
+                <Minus size={18} />
+            </button>
+            <span className="stepper-value">{value}{suffix}</span>
+            <button
+                className="stepper-btn"
+                onClick={() => onChange(Math.min(max, value + step))}
+                disabled={value >= max}
+            >
+                <Plus size={18} />
             </button>
         </div>
-    );
+    </div>
+);
 
+// Slider component
+const Slider = ({ label, value, onChange, min, max, step }) => (
+    <div className="settings-row">
+        <label className="settings-label">{label}</label>
+        <div className="settings-slider-wrapper">
+            <input
+                type="range"
+                className="settings-slider"
+                min={min}
+                max={max}
+                step={step}
+                value={value}
+                onChange={(e) => onChange(parseInt(e.target.value))}
+            />
+            <span className="slider-value">{value}</span>
+        </div>
+    </div>
+);
+
+// Toggle component
+const Toggle = ({ label, value, onChange }) => (
+    <div className="settings-row">
+        <label className="settings-label">{label}</label>
+        <button
+            className={`settings-toggle ${value ? 'active' : ''}`}
+            onClick={() => onChange(!value)}
+        >
+            <span className="toggle-track">
+                <span className="toggle-thumb" />
+            </span>
+        </button>
+    </div>
+);
+
+const ReaderSettings = ({ isOpen, onClose, settings, updateSetting, resetSettings }) => {
     return (
         <AnimatePresence>
             {isOpen && (
