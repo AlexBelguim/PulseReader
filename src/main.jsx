@@ -2,7 +2,21 @@ import { StrictMode, Component } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
+import { fontFaceCss, UI_FONTS } from './utils/fonts'
 // import { registerSW } from 'virtual:pwa-register'
+
+// The UI fonts come with the app (see utils/fonts). Defined from JS so the
+// URLs resolve against the page, the same way the reader's do.
+const fontFaces = document.createElement('style')
+fontFaces.textContent = fontFaceCss(UI_FONTS, 'swap')
+document.head.appendChild(fontFaces)
+
+// Versions before the fonts were bundled cached Google Fonts at runtime.
+if ('caches' in window) {
+  for (const name of ['google-fonts-cache', 'gstatic-fonts-cache']) {
+    caches.delete(name).catch(() => {})
+  }
+}
 
 // registerSW({ immediate: true })
 

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { fontFaceCss, READER_FONTS } from '../utils/fonts';
 
 const STORAGE_KEY = 'rsvp-reader-settings';
 
@@ -100,8 +101,8 @@ export const useReaderSettings = () => {
         }
 
         return `
-      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Literata:wght@300;400;500;600;700&family=Comfortaa:wght@300;400;500;600;700&display=swap');
-      
+      ${fontFaceCss(READER_FONTS, 'block')}
+
       html, body {
         background-color: ${theme.background} !important;
         color: ${theme.text} !important;

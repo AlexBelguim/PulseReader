@@ -21,6 +21,7 @@ import {
     saveLocationsCache,
 } from '../services/db';
 import { useReaderSettings } from '../hooks/useReaderSettings';
+import { loadFont, installFont } from '../utils/fonts';
 import ReaderSettings from './ReaderSettings';
 import TableOfContents from './TableOfContents';
 import RSVPOverlay from './RSVPOverlay';
@@ -32,6 +33,21 @@ const computeStyleSig = (s) => JSON.stringify([
     s.colorTheme, s.fontType, s.fontSize, s.fontWeight,
     s.lineSpacing, s.textAlignment, s.pageMargins,
 ]);
+
+// Put the reader typography into one section document. The selected font goes
+// in first, already decoded (see utils/fonts), so the layout these styles
+// trigger -- the one epub.js paginates and finds the position in -- is in the
+// real font rather than a fallback that reflows when the font arrives.
+const styleSection = (doc, css, fontType) => {
+    installFont(doc, fontType);
+    let styleEl = doc.getElementById('reader-custom-styles');
+    if (!styleEl) {
+        styleEl = doc.createElement('style');
+        styleEl.id = 'reader-custom-styles';
+        doc.head.appendChild(styleEl);
+    }
+    styleEl.textContent = css;
+};
 
 const Reader = () => {
     const { bookId } = useParams();
@@ -109,6 +125,8 @@ const Reader = () => {
     // newly-loaded sections) and the last applied typography signature.
     const getEpubStylesRef = useRef(getEpubStyles);
     getEpubStylesRef.current = getEpubStyles;
+    const fontTypeRef = useRef(settings.fontType);
+    fontTypeRef.current = settings.fontType;
     const styleSigRef = useRef(computeStyleSig(settings));
 
     // Fraction of the whole book that one screen page spans. Calibrated once
@@ -373,6 +391,12 @@ const Reader = () => {
                 pageFractionRef.current = 0;
                 pageFractionGoodRef.current = false;
 
+                // The reader font downloads alongside the book, so it is
+                // ready for the first layout.
+                const fontReady = loadFont(fontTypeRef.current).catch((err) => {
+                    console.warn('Reader font failed to load:', err);
+                });
+
                 // Create new book instance
                 const epubBook = ePub(book.data);
                 bookRef.current = epubBook;
@@ -385,6 +409,8 @@ const Reader = () => {
                 if (navigation?.toc) {
                     setChapters(navigation.toc);
                 }
+
+                await fontReady;
 
                 // Create rendition
                 const rendition = epubBook.renderTo(viewerRef.current, {
@@ -416,13 +442,7 @@ const Reader = () => {
                 rendition.hooks.content.register((contents) => {
                     const doc = contents.document;
                     if (!doc) return;
-                    let styleEl = doc.getElementById('reader-custom-styles');
-                    if (!styleEl) {
-                        styleEl = doc.createElement('style');
-                        styleEl.id = 'reader-custom-styles';
-                        doc.head.appendChild(styleEl);
-                    }
-                    styleEl.textContent = getEpubStylesRef.current();
+                    styleSection(doc, getEpubStylesRef.current(), fontTypeRef.current);
                 });
 
                 // Handle location changes
@@ -511,13 +531,15 @@ const Reader = () => {
                     }
                 }
                 if (restored) {
-                    // The reader fonts load with font-display: swap, so the
-                    // first layout is in a fallback font. When the real one
-                    // arrives the text reflows -- the saved spot moves onto a
-                    // later page while the view stays put, so books reopened a
-                    // page early (and, when that page got saved, crept back a
-                    // page per open). Re-anchor once the fonts have loaded,
-                    // unless the reader has already moved on.
+                    // The reader font is normally in place before the first
+                    // layout (styleSection). When it is not -- its fetch
+                    // failed, or the browser decodes font data in the
+                    // background -- the first layout is in a fallback font and
+                    // the text reflows when the real one arrives: the saved
+                    // spot moves onto a later page while the view stays put,
+                    // so books reopened a page early (and, when that page got
+                    // saved, crept back a page per open). Re-anchor once the
+                    // fonts have loaded, unless the reader has already moved on.
                     const doc = rendition.getContents()[0]?.document;
                     let reanchored = false;
                     const reanchor = async () => {
@@ -697,61 +719,63 @@ const Reader = () => {
         // adjusting the RSVP speed mid-read — from re-paginating the book.
         const sig = computeStyleSig(settings);
         if (sig === styleSigRef.current) return;
-        styleSigRef.current = sig;
 
         const rendition = renditionRef.current;
 
-        // Re-inject styles when settings change
-        rendition.themes.default({
-            body: {
-                background: themeColors.background,
-                color: themeColors.text,
-                padding: settings.pageMargins ? '20px' : '0',
-            }
-        });
+        // A newly picked font is fetched before anything is re-laid out, for
+        // the same reason the first layout waits for it: laid out in a
+        // fallback, the text would reflow under the anchor when it arrived.
+        // The signature is only taken once applied, so a run cancelled while
+        // waiting is picked up by the next one.
+        let cancelled = false;
+        loadFont(settings.fontType).catch(() => { /* @font-face fallback */ }).then(() => {
+            if (cancelled || renditionRef.current !== rendition) return;
+            styleSigRef.current = sig;
 
-        // Apply styles to current content
-        rendition.getContents().forEach((c) => {
-            const doc = c.document;
-            if (doc) {
-                let styleEl = doc.getElementById('reader-custom-styles');
-                if (!styleEl) {
-                    styleEl = doc.createElement('style');
-                    styleEl.id = 'reader-custom-styles';
-                    doc.head.appendChild(styleEl);
+            // Re-inject styles when settings change
+            rendition.themes.default({
+                body: {
+                    background: themeColors.background,
+                    color: themeColors.text,
+                    padding: settings.pageMargins ? '20px' : '0',
                 }
-                styleEl.textContent = getEpubStyles();
+            });
+
+            // Apply styles to current content
+            rendition.getContents().forEach((c) => {
+                if (c.document) styleSection(c.document, getEpubStyles(), settings.fontType);
+            });
+
+            // Force re-display at current position so epub.js re-paginates
+            // with the new styles. Without this, changing font/margins/spacing
+            // breaks the paginated layout. Re-calibrate the page total afterwards
+            // so "page X / Y" reflects the new typography.
+            if (lastLocationRef.current) {
+                // Re-paginating is not navigation. Unguarded, every font-size or
+                // margin nudge saved whatever page start the reflow settled on, and
+                // the book crept backward one adjustment at a time.
+                const anchor = lastLocationRef.current;
+                beginReflow();
+                landOnCfi(rendition, anchor)
+                    .then(() => {
+                        const loc = rendition.currentLocation?.();
+                        if (loc) updatePageCount(loc, true);
+                    })
+                    .catch(() => { /* ignore */ })
+                    .finally(() => {
+                        // Held briefly past the promise: epub.js queues its location
+                        // report, so 'relocated' can land a tick after display()
+                        // resolves. Releasing immediately would let exactly the
+                        // event we are guarding against through.
+                        setTimeout(() => {
+                            lastLocationRef.current = anchor;
+                            endReflow();
+                        }, 150);
+                    });
             }
         });
 
-        // Force re-display at current position so epub.js re-paginates
-        // with the new styles. Without this, changing font/margins/spacing
-        // breaks the paginated layout. Re-calibrate the page total afterwards
-        // so "page X / Y" reflects the new typography.
-        if (lastLocationRef.current) {
-            // Re-paginating is not navigation. Unguarded, every font-size or
-            // margin nudge saved whatever page start the reflow settled on, and
-            // the book crept backward one adjustment at a time.
-            const anchor = lastLocationRef.current;
-            beginReflow();
-            landOnCfi(rendition, anchor)
-                .then(() => {
-                    const loc = rendition.currentLocation?.();
-                    if (loc) updatePageCount(loc, true);
-                })
-                .catch(() => { /* ignore */ })
-                .finally(() => {
-                    // Held briefly past the promise: epub.js queues its location
-                    // report, so 'relocated' can land a tick after display()
-                    // resolves. Releasing immediately would let exactly the
-                    // event we are guarding against through.
-                    setTimeout(() => {
-                        lastLocationRef.current = anchor;
-                        endReflow();
-                    }, 150);
-                });
-        }
-
+        return () => { cancelled = true; };
     }, [settings, getEpubStyles, themeColors, updatePageCount, beginReflow, endReflow, landOnCfi]);
 
     // Navigation functions with debouncing
