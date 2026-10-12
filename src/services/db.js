@@ -3,8 +3,19 @@ import { openDB } from 'idb';
 const DB_NAME = 'pulse-reader-db';
 const DB_VERSION = 4;
 
-export const initDB = async () => {
-    return openDB(DB_NAME, DB_VERSION, {
+// One connection for the page's lifetime. Opening a fresh one per call made
+// every page-turn save pay for two IndexedDB opens.
+let dbPromise = null;
+
+export const initDB = () => {
+    if (dbPromise) return dbPromise;
+    const opening = openDB(DB_NAME, DB_VERSION, {
+        // Another tab wants to upgrade the schema: step aside so it can, and
+        // reopen on next use.
+        blocking() {
+            opening.then((db) => db.close());
+            dbPromise = null;
+        },
         upgrade(db, oldVersion, newVersion, transaction) {
             const store = db.objectStoreNames.contains('books')
                 ? transaction.objectStore('books')
@@ -25,7 +36,27 @@ export const initDB = async () => {
             }
         },
     });
+    dbPromise = opening.catch((err) => {
+        dbPromise = null;
+        throw err;
+    });
+    return dbPromise;
 };
+
+// Progress writes are read-modify-write (merge onto what's stored), so two
+// running at once could each read the old row and the later one would undo
+// the earlier. They run one after another instead, and readers can wait for
+// the queue so Back never shows the page before the last one.
+let progressQueue = Promise.resolve();
+
+const queueProgressWrite = (fn) => {
+    const run = progressQueue.then(fn);
+    progressQueue = run.catch(() => { /* keep the queue going */ });
+    return run;
+};
+
+/** Resolves once every progress write queued so far has landed. */
+export const whenProgressSaved = () => progressQueue;
 
 export const addBook = async (bookData) => {
     const db = await initDB();
@@ -47,6 +78,7 @@ export const addBook = async (bookData) => {
 };
 
 export const getBooks = async () => {
+    await whenProgressSaved();
     const db = await initDB();
     const [books, progressEntries] = await Promise.all([
         db.getAllFromIndex('books', 'addedAt'),
@@ -127,7 +159,10 @@ export const getAllProgress = async () => {
     return map;
 };
 
-export const saveProgress = async (bookId, { cfi, percentage, isRead, updatedAt } = {}) => {
+export const saveProgress = (bookId, fields = {}) =>
+    queueProgressWrite(() => writeProgress(bookId, fields));
+
+const writeProgress = async (bookId, { cfi, percentage, isRead, updatedAt }) => {
     const db = await initDB();
     // Base on getProgress rather than a raw store read, so the pre-v4 fallback
     // (position still on the book record) is part of the merge. Reading only
@@ -156,6 +191,7 @@ export const updateBookProgress = async (id, location, progress) => {
 };
 
 export const toggleBookRead = async (id) => {
+    await whenProgressSaved();
     const current = await getProgress(id);
     const newState = !(current?.isRead);
     await saveProgress(id, { isRead: newState });
@@ -169,7 +205,7 @@ export const toggleBookRead = async (id) => {
  * clearing the store) so pre-v4 positions on the book records can't come
  * back through the getProgress fallback.
  */
-export const resetAllProgress = async () => {
+export const resetAllProgress = () => queueProgressWrite(async () => {
     const db = await initDB();
     const ids = await db.getAllKeys('books');
     const tx = db.transaction('progress', 'readwrite');
@@ -177,7 +213,7 @@ export const resetAllProgress = async () => {
         ...ids.map((bookId) => tx.store.put({ bookId, cfi: null, percentage: 0, isRead: false, updatedAt: null })),
         tx.done,
     ]);
-};
+});
 
 // ---- Cached epub.js locations (content-based, layout-independent) ----
 
@@ -192,6 +228,8 @@ export const saveLocationsCache = async (bookId, { json, chars }) => {
 };
 
 export const deleteBook = async (id) => {
+    // A queued progress write landing after the delete would recreate the row.
+    await whenProgressSaved();
     const db = await initDB();
     await db.delete('books', id);
     // Best-effort cleanup of the auxiliary stores.

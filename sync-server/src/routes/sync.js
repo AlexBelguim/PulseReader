@@ -94,19 +94,33 @@ export function syncRouter(db, booksDir) {
 
             const upsert = force ? forceUpsert : mergeUpsert;
 
+            // Marking a book read/unread: touch is_read only. A new row gets no
+            // position, which clients read as "nothing to restore".
+            const readStateUpsert = db.prepare(`
+                INSERT INTO reading_progress (user_id, book_id, location, progress, is_read, updated_at)
+                VALUES (?, ?, NULL, 0, ?, ?)
+                ON CONFLICT(user_id, book_id) DO UPDATE SET
+                    is_read = excluded.is_read
+            `);
+
             // Books the server doesn't know (deleted since the client last
             // synced) are skipped rather than failing the whole batch.
             const bookExists = db.prepare('SELECT 1 FROM books WHERE id = ?');
             const transaction = db.transaction((updates) => {
                 for (const update of updates) {
                     if (!bookExists.get(update.book_id)) continue;
+                    const updatedAt = update.updated_at || new Date().toISOString();
+                    if (update.read_state_only) {
+                        readStateUpsert.run(req.user.id, update.book_id, update.is_read ? 1 : 0, updatedAt);
+                        continue;
+                    }
                     upsert.run(
                         req.user.id,
                         update.book_id,
-                        update.location,
-                        update.progress,
+                        update.location ?? null,
+                        update.progress ?? 0,
                         update.is_read ? 1 : 0,
-                        update.updated_at || new Date().toISOString()
+                        updatedAt
                     );
                 }
             });

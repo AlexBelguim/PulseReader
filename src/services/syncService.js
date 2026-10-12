@@ -230,11 +230,13 @@ export async function syncProgress(progressUpdates, force = false) {
  */
 export async function pushBookState(book) {
     if (!book?.syncId || !isServerConnected()) return;
+    // Read-state only. Sending this device's position along with it erased
+    // the server's when this device had never opened the book (it sent "no
+    // location, 0%"), and pushed a stale one when it had.
     await syncProgress([{
         book_id: book.syncId,
-        location: book.lastRead || null,
-        progress: book.progress || 0,
         is_read: !!book.isRead,
+        read_state_only: true,
         updated_at: new Date().toISOString(),
     }], true);
 }
@@ -361,11 +363,12 @@ export async function pullProgress(localBooks, updateProgressFn, updateBookFn) {
             if (!hasServerRow) continue;
 
             try {
-                await updateProgressFn(
-                    localBook.id,
-                    serverBook.last_read || null,
-                    serverBook.progress || 0,
-                );
+                // A row can hold read-state alone (marked read on a device
+                // that never opened the book). Then there is no position to
+                // take, and writing its 0% would reset this device's.
+                if (serverBook.last_read) {
+                    await updateProgressFn(localBook.id, serverBook.last_read, serverBook.progress || 0);
+                }
                 await updateBookFn(localBook.id, { isRead: serverBook.is_read === 1 });
                 result.pulled++;
             } catch (err) {

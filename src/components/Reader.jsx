@@ -59,6 +59,12 @@ const Reader = () => {
     const endReflow = useCallback(() => {
         reflowDepthRef.current = Math.max(0, reflowDepthRef.current - 1);
     }, []);
+    // True from the restoring display(savedCfi) on open until its relocated
+    // arrives. That event reports the START of the page the saved spot is on,
+    // which is earlier than the spot itself (and earlier still on a smaller
+    // screen), so saving it would walk the position back a little on every
+    // open. It still drives the UI; it just isn't saved.
+    const restoringRef = useRef(false);
 
     // State
     const [book, setBook] = useState(null);
@@ -192,60 +198,117 @@ const Reader = () => {
     // re-layout. Wraps only the words (not the whole paragraph) in a temporary
     // inline span, then unwraps it. Inline wrapping doesn't change layout, so
     // it can't repaginate. Falls back to an element flash if wrapping fails.
+    // The highlight is drawn over the page, in this document, never inside
+    // the book. It used to wrap the words in a <span>, which split the text
+    // node: a position saved while the span was there (a page turn within its
+    // 3 seconds, right after opening) pointed somewhere else once it was gone.
+    const flashLayerRef = useRef(null);
+    const clearFlash = useCallback(() => {
+        flashLayerRef.current?.remove();
+        flashLayerRef.current = null;
+    }, []);
+
     const flashCfi = useCallback((cfi) => {
         if (!cfi) return;
         try {
-            const contents = renditionRef.current?.getContents();
-            if (!contents || contents.length === 0) return;
-            const startRange = contents[0].range(cfi);
-            if (!startRange) return;
+            for (const content of renditionRef.current?.getContents() || []) {
+                let startRange = null;
+                try { startRange = content.range(cfi); } catch { /* another section */ }
+                if (!startRange) continue;
 
-            const node = startRange.startContainer;
-            const startOffset = startRange.startOffset;
-
-            // Build a range over the first ~6 words from the anchor.
-            if (node.nodeType === Node.TEXT_NODE) {
-                const doc = node.ownerDocument;
-                const rest = node.textContent.slice(startOffset);
-                const m = rest.match(/^\s*(?:\S+\s+){0,5}\S+/);
-                const len = m ? m[0].length : Math.min(rest.length, 40);
-                if (len > 0) {
-                    const range = doc.createRange();
-                    range.setStart(node, startOffset);
-                    range.setEnd(node, Math.min(startOffset + len, node.textContent.length));
-
-                    const span = doc.createElement('span');
-                    span.style.cssText =
-                        'background-color: rgba(255,75,75,0.45); box-shadow: 0 0 8px rgba(255,75,75,0.5); border-radius: 3px;';
-                    range.surroundContents(span);
-
-                    setTimeout(() => {
-                        const parent = span.parentNode;
-                        if (!parent) return;
-                        while (span.firstChild) parent.insertBefore(span.firstChild, span);
-                        parent.removeChild(span);
-                        parent.normalize();
-                    }, 3000);
-                    return;
+                const doc = content.document;
+                const node = startRange.startContainer;
+                const range = doc.createRange();
+                if (node.nodeType === Node.TEXT_NODE) {
+                    // The first ~6 words from the anchor.
+                    const off = startRange.startOffset;
+                    const rest = node.textContent.slice(off);
+                    const m = rest.match(/^\s*(?:\S+\s+){0,5}\S+/);
+                    const len = m ? m[0].length : Math.min(rest.length, 40);
+                    range.setStart(node, off);
+                    range.setEnd(node, Math.min(off + len, node.textContent.length));
+                } else {
+                    range.selectNodeContents(node);
                 }
-            }
 
-            // Fallback: flash the containing element
-            const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
-            if (!el) return;
-            el.style.transition = 'background-color 0.5s ease, box-shadow 0.5s ease';
-            el.style.backgroundColor = 'rgba(255, 75, 75, 0.25)';
-            el.style.boxShadow = '0 0 8px rgba(255, 75, 75, 0.4)';
-            el.style.borderRadius = '4px';
-            setTimeout(() => {
-                el.style.backgroundColor = '';
-                el.style.boxShadow = '';
-                el.style.borderRadius = '';
-            }, 2500);
+                const frame = doc.defaultView?.frameElement?.getBoundingClientRect();
+                const viewer = viewerRef.current?.getBoundingClientRect();
+                if (!frame) return;
+                const layer = document.createElement('div');
+                layer.className = 'reader-flash-layer';
+                for (const r of range.getClientRects()) {
+                    const x = frame.left + r.left;
+                    const y = frame.top + r.top;
+                    // Skip the part of a range that sits on a neighbouring page.
+                    if (viewer && (x + r.width <= viewer.left || x >= viewer.right)) continue;
+                    const box = document.createElement('div');
+                    box.className = 'reader-flash-box';
+                    box.style.cssText = `left:${x}px;top:${y}px;width:${r.width}px;height:${r.height}px`;
+                    layer.appendChild(box);
+                }
+                if (!layer.childNodes.length) return;
+                clearFlash();
+                document.body.appendChild(layer);
+                flashLayerRef.current = layer;
+                setTimeout(() => layer.classList.add('fading'), 2400);
+                setTimeout(() => {
+                    layer.remove();
+                    if (flashLayerRef.current === layer) flashLayerRef.current = null;
+                }, 3000);
+                return;
+            }
         } catch {
             // flash is a best-effort visual hint
         }
-    }, []);
+    }, [clearFlash]);
+
+    // display(cfi) shows the page holding the CFI's exact point, and the
+    // page-start CFI epub.js reports usually points at the space that ends the
+    // previous page's last line. So every "back to where I was" -- opening a
+    // book, a fold/fullscreen re-layout, a font change -- landed one page
+    // early. Display, then step forward when the first real character is on
+    // the next page. The step runs under the reflow guard, so it isn't saved
+    // as navigation; the UI is updated here instead.
+    const landOnCfi = useCallback(async (rendition, cfi) => {
+        await rendition.display(cfi);
+        if (rendition.settings?.flow === 'scrolled') return;
+        let x = null;
+        for (const content of rendition.getContents() || []) {
+            let range = null;
+            try { range = content.range(cfi); } catch { /* another section */ }
+            if (!range) continue;
+            const node = range.startContainer;
+            const probe = content.document.createRange();
+            if (node.nodeType === Node.TEXT_NODE) {
+                const skip = node.textContent.slice(range.startOffset).search(/\S/);
+                if (skip < 0) return;
+                const off = range.startOffset + skip;
+                probe.setStart(node, off);
+                probe.setEnd(node, off + 1);
+            } else {
+                probe.selectNodeContents(node);
+            }
+            const rect = probe.getBoundingClientRect();
+            const frame = content.document.defaultView?.frameElement?.getBoundingClientRect();
+            if (frame && (rect.width || rect.height)) x = frame.left + rect.left;
+            break;
+        }
+        const viewer = viewerRef.current?.getBoundingClientRect();
+        if (x === null || !viewer || x < viewer.right - 1) return;
+
+        beginReflow();
+        try {
+            await rendition.next();
+            const loc = rendition.currentLocation?.();
+            if (loc?.start) {
+                setCurrentLocation(loc);
+                if (loc.start.href) setCurrentChapter(loc.start.href);
+                updatePageCount(loc);
+            }
+        } finally {
+            setTimeout(endReflow, 150);
+        }
+    }, [beginReflow, endReflow, updatePageCount]);
 
     // Load book from IndexedDB
     useEffect(() => {
@@ -301,6 +364,11 @@ const Reader = () => {
                 }
 
                 setLocationsReady(false);
+                // A reflow still open on the old rendition (a font change
+                // followed quickly by a view-mode switch) must not carry over:
+                // with the guard stuck open, nothing would be saved again.
+                reflowDepthRef.current = 0;
+                restoringRef.current = false;
                 sectionLocsRef.current = new Map();
                 pageFractionRef.current = 0;
                 pageFractionGoodRef.current = false;
@@ -367,13 +435,18 @@ const Reader = () => {
                         return;
                     }
 
+                    clearFlash();
                     setCurrentLocation(location);
-                    lastLocationRef.current = location.start?.cfi;
+                    const restoring = restoringRef.current;
+                    restoringRef.current = false;
+                    if (!restoring) lastLocationRef.current = location.start?.cfi;
 
-                    // Calculate progress from percentage
-                    if (location.start?.percentage !== undefined) {
-                        setProgress(location.start.percentage);
-                    }
+                    // epub.js reports percentage 0 (not undefined) until the
+                    // locations are generated, so only trust it once they are.
+                    // Otherwise opening a book on a new device saved 0% over
+                    // the real progress.
+                    const pct = epubBook.locations.length() ? location.start?.percentage : undefined;
+                    if (pct !== undefined) setProgress(pct);
 
                     // Update current chapter
                     if (location.start?.href) {
@@ -385,13 +458,10 @@ const Reader = () => {
                     // width, so this naturally reflects the live layout.
                     updatePageCount(location);
 
-                    // Save progress to database (lightweight — progress store only)
-                    if (location.start?.cfi) {
-                        updateBookProgress(
-                            parseInt(bookId),
-                            location.start.cfi,
-                            location.start.percentage || 0
-                        );
+                    // Save progress to database (lightweight — progress store
+                    // only). An undefined percentage keeps the stored one.
+                    if (location.start?.cfi && !restoring) {
+                        updateBookProgress(parseInt(bookId), location.start.cfi, pct);
                     }
 
                     // Reset navigation lock
@@ -420,22 +490,64 @@ const Reader = () => {
                 // Display book FIRST - resume from last position if available
                 // Priority: savedCfi (from mode switch) > book.lastRead (from DB)
                 const startLocation = savedCfi || book.lastRead;
+                let restored = false;
                 if (startLocation) {
-                    // Deliberately NOT wrapped in beginReflow/endReflow. This
-                    // first relocated is what seeds chapter, progress and page
-                    // count -- suppress it and the reader opens blank. It does
-                    // floor a mid-page cfi to the page start, but that settles
-                    // after one open rather than compounding, so it is left as
-                    // the one place epub.js is allowed to define the position.
-                    await rendition.display(startLocation);
-
-                    // Flash the resumed position after content is rendered
-                    // Use a one-time relocated handler to ensure content is ready
-                    const flashOnce = () => {
-                        rendition.off('relocated', flashOnce);
+                    // Not wrapped in beginReflow/endReflow: this first relocated
+                    // seeds chapter, progress and page count, and suppressing it
+                    // opens the reader blank. restoringRef keeps it from being
+                    // SAVED instead (it reports the page start, not the spot).
+                    restoringRef.current = true;
+                    lastLocationRef.current = startLocation;
+                    try {
+                        await landOnCfi(rendition, startLocation);
+                        restored = true;
+                    } catch (err) {
+                        // A position this edition can't resolve (the epub was
+                        // replaced on the server, a corrupt save) used to make
+                        // the book impossible to open. Start at the beginning.
+                        console.warn('Saved position could not be opened, starting from the beginning:', err);
+                        restoringRef.current = false;
+                        lastLocationRef.current = null;
+                    }
+                }
+                if (restored) {
+                    // The reader fonts load with font-display: swap, so the
+                    // first layout is in a fallback font. When the real one
+                    // arrives the text reflows -- the saved spot moves onto a
+                    // later page while the view stays put, so books reopened a
+                    // page early (and, when that page got saved, crept back a
+                    // page per open). Re-anchor once the fonts have loaded,
+                    // unless the reader has already moved on.
+                    const doc = rendition.getContents()[0]?.document;
+                    let reanchored = false;
+                    const reanchor = async () => {
+                        if (reanchored || renditionRef.current !== rendition) return;
+                        if (lastLocationRef.current !== startLocation) return;
+                        reanchored = true;
+                        beginReflow();
+                        try {
+                            await landOnCfi(rendition, startLocation);
+                            const loc = rendition.currentLocation();
+                            if (loc?.start) {
+                                setCurrentLocation(loc);
+                                if (loc.start.href) setCurrentChapter(loc.start.href);
+                                updatePageCount(loc, true);
+                            }
+                        } catch { /* stay where we are */ } finally {
+                            setTimeout(endReflow, 150);
+                        }
                         setTimeout(() => flashCfi(startLocation), 200);
                     };
-                    rendition.on('relocated', flashOnce);
+                    if (doc?.fonts) {
+                        doc.fonts.addEventListener('loadingdone', reanchor, { once: true });
+                        setTimeout(() => doc.fonts.removeEventListener('loadingdone', reanchor), 8000);
+                        // Already loaded (cached) before we started listening.
+                        doc.fonts.ready.then(() => {
+                            if (doc.fonts.status === 'loaded' && doc.fonts.size > 0) reanchor();
+                        });
+                    }
+                    // No font event at all (offline, fonts blocked): still flash.
+                    setTimeout(() => { if (!reanchored) flashCfi(startLocation); }, 1500);
                 } else {
                     await rendition.display();
                 }
@@ -451,7 +563,12 @@ const Reader = () => {
                     if (loc) updatePageCount(loc, true);
                     if (lastLocationRef.current) {
                         const pct = epubBook.locations.percentageFromCfi(lastLocationRef.current);
-                        if (pct !== undefined && pct !== null) setProgress(pct);
+                        if (pct !== undefined && pct !== null) {
+                            setProgress(pct);
+                            // The open-time save had no percentage to give, so
+                            // store the real one now that it's known.
+                            saveProgress(parseInt(bookId), { percentage: pct });
+                        }
                     }
                 };
 
@@ -522,7 +639,7 @@ const Reader = () => {
                     if (renditionRef.current && cfi) {
                         renditionRef.current.resize('100%', '100%');
                         try {
-                            await renditionRef.current.display(cfi);
+                            await landOnCfi(renditionRef.current, cfi);
                         } catch { /* ignore */ }
                         const loc = renditionRef.current.currentLocation?.();
                         if (loc) updatePageCount(loc, true); // layout changed
@@ -617,7 +734,7 @@ const Reader = () => {
             // the book crept backward one adjustment at a time.
             const anchor = lastLocationRef.current;
             beginReflow();
-            rendition.display(anchor)
+            landOnCfi(rendition, anchor)
                 .then(() => {
                     const loc = rendition.currentLocation?.();
                     if (loc) updatePageCount(loc, true);
@@ -635,7 +752,7 @@ const Reader = () => {
                 });
         }
 
-    }, [settings, getEpubStyles, themeColors, updatePageCount, beginReflow, endReflow]);
+    }, [settings, getEpubStyles, themeColors, updatePageCount, beginReflow, endReflow, landOnCfi]);
 
     // Navigation functions with debouncing
     const goNext = useCallback(() => {
@@ -771,6 +888,22 @@ const Reader = () => {
         };
     }, [wordSelectMode]);
 
+    // RSVP reports where it is while it plays (every few words, on pause, and
+    // when the app is hidden or closed), so quitting the app mid-RSVP resumes
+    // at that word instead of wherever RSVP was started. Only the save and
+    // the anchor move here; the page under the overlay is left alone.
+    const handleRSVPProgress = useCallback((cfi) => {
+        if (!cfi) return;
+        lastLocationRef.current = cfi;
+        let pct;
+        try {
+            if (bookRef.current?.locations?.length()) {
+                pct = bookRef.current.locations.percentageFromCfi(cfi);
+            }
+        } catch { /* keep the stored percentage */ }
+        updateBookProgress(parseInt(bookId), cfi, pct ?? undefined);
+    }, [bookId]);
+
     // Handle RSVP close - navigate to the last read position, persist the
     // exact word we stopped on, and highlight it.
     const handleRSVPCloseWithPosition = useCallback((wordInfo) => {
@@ -785,7 +918,7 @@ const Reader = () => {
             // event can arrive after the promise resolves, and then it won.
             // Suppressing it instead makes the save below the only writer.
             beginReflow();
-            renditionRef.current.display(cfi)
+            landOnCfi(renditionRef.current, cfi)
                 .then(() => {
                     lastLocationRef.current = cfi;
                     saveProgress(parseInt(bookId), { cfi, percentage: pct ?? progress });
@@ -810,7 +943,7 @@ const Reader = () => {
         }
         // highlightLastWord is deliberately absent: it is declared below this
         // callback, so naming it here would hit the TDZ during render.
-    }, [bookId, progress, beginReflow, endReflow, updatePageCount]);
+    }, [bookId, progress, beginReflow, endReflow, updatePageCount, landOnCfi]);
 
     // Helper function to highlight the last word
     const highlightLastWord = useCallback((wordInfo) => {
@@ -1208,6 +1341,7 @@ const Reader = () => {
                 wpm={settings.rsvpSpeed}
                 onWpmChange={(newWpm) => updateSetting('rsvpSpeed', newWpm)}
                 onStopAtImage={handleRSVPStopAtImage}
+                onProgress={handleRSVPProgress}
                 onCloseWithPosition={handleRSVPCloseWithPosition}
             />
         </div>
