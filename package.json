@@ -11,7 +11,7 @@
     "build": "vite build",
     "start": "npm run build && npm --prefix sync-server start",
     "lint": "eslint .",
-    "test": "node tools/test_tokenize_offsets.mjs && npm --prefix sync-server test",
+    "test": "node tools/test_tokenize_offsets.mjs && node tools/test_sync_plan.mjs && npm --prefix sync-server test",
     "preview": "vite preview"
   },
   "dependencies": {

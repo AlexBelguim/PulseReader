@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { scanBooksFolder } from '../scanner.js';
+import { applyProgressUpdates } from '../progressMerge.js';
 
 export function syncRouter(db, booksDir) {
     const router = Router();
@@ -14,7 +15,8 @@ export function syncRouter(db, booksDir) {
             const books = db.prepare(`
                 SELECT b.id, b.title, b.author, b.series, b.filename, b.filepath,
                        b.file_hash, b.file_size, b.cover_path, b.added_at, b.updated_at,
-                       rp.location as last_read, rp.progress, rp.is_read, rp.updated_at as progress_updated_at
+                       rp.location as last_read, rp.progress, rp.is_read, rp.updated_at as progress_updated_at,
+                       rp.read_updated_at
                 FROM books b
                 LEFT JOIN reading_progress rp ON b.id = rp.book_id AND rp.user_id = ?
                 ORDER BY b.series, b.title
@@ -45,10 +47,12 @@ export function syncRouter(db, booksDir) {
 
     /**
      * POST /api/sync/progress
-     * Batch update reading progress from client.
-     * Body: { progress: [{ book_id, location, progress, is_read, updated_at }] }
-     * 
-     * Uses last-write-wins conflict resolution based on updated_at timestamps.
+     * Batch update reading progress from a device.
+     * Body: { progress: [{ book_id, location, progress, is_read, updated_at,
+     *                      read_updated_at, read_state_only }], force }
+     *
+     * The more recent side wins, per book, for the position and the read flag
+     * separately (see progressMerge.js); force is Push: take the device's.
      */
     router.post('/progress', (req, res) => {
         try {
@@ -57,75 +61,7 @@ export function syncRouter(db, booksDir) {
                 return res.status(400).json({ error: 'Expected progress array' });
             }
 
-            // Default (auto) merge: highest-progress-wins, is_read is sticky.
-            const mergeUpsert = db.prepare(`
-                INSERT INTO reading_progress (user_id, book_id, location, progress, is_read, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id, book_id) DO UPDATE SET
-                    location = CASE
-                        WHEN excluded.progress > reading_progress.progress THEN excluded.location
-                        ELSE reading_progress.location
-                    END,
-                    progress = CASE
-                        WHEN excluded.progress > reading_progress.progress THEN excluded.progress
-                        ELSE reading_progress.progress
-                    END,
-                    is_read = CASE
-                        WHEN excluded.is_read = 1 OR reading_progress.is_read = 1 THEN 1
-                        ELSE 0
-                    END,
-                    updated_at = CASE
-                        WHEN excluded.progress > reading_progress.progress THEN excluded.updated_at
-                        ELSE reading_progress.updated_at
-                    END
-            `);
-
-            // Explicit push: the client is the source of truth, so overwrite
-            // unconditionally. Lets the user lower progress or clear read-state.
-            const forceUpsert = db.prepare(`
-                INSERT INTO reading_progress (user_id, book_id, location, progress, is_read, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id, book_id) DO UPDATE SET
-                    location = excluded.location,
-                    progress = excluded.progress,
-                    is_read = excluded.is_read,
-                    updated_at = excluded.updated_at
-            `);
-
-            const upsert = force ? forceUpsert : mergeUpsert;
-
-            // Marking a book read/unread: touch is_read only. A new row gets no
-            // position, which clients read as "nothing to restore".
-            const readStateUpsert = db.prepare(`
-                INSERT INTO reading_progress (user_id, book_id, location, progress, is_read, updated_at)
-                VALUES (?, ?, NULL, 0, ?, ?)
-                ON CONFLICT(user_id, book_id) DO UPDATE SET
-                    is_read = excluded.is_read
-            `);
-
-            // Books the server doesn't know (deleted since the client last
-            // synced) are skipped rather than failing the whole batch.
-            const bookExists = db.prepare('SELECT 1 FROM books WHERE id = ?');
-            const transaction = db.transaction((updates) => {
-                for (const update of updates) {
-                    if (!bookExists.get(update.book_id)) continue;
-                    const updatedAt = update.updated_at || new Date().toISOString();
-                    if (update.read_state_only) {
-                        readStateUpsert.run(req.user.id, update.book_id, update.is_read ? 1 : 0, updatedAt);
-                        continue;
-                    }
-                    upsert.run(
-                        req.user.id,
-                        update.book_id,
-                        update.location ?? null,
-                        update.progress ?? 0,
-                        update.is_read ? 1 : 0,
-                        updatedAt
-                    );
-                }
-            });
-
-            transaction(progressUpdates);
+            applyProgressUpdates(db, req.user.id, progressUpdates, { force: !!force });
 
             // Return current state
             const currentProgress = db.prepare(`

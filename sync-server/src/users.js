@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { normalizeProgressTimes } from './progressMerge.js';
 
 // ---- Passwords --------------------------------------------------------------
 // scrypt from Node itself: no native module to build, and the parameters are
@@ -132,5 +133,6 @@ function adoptLegacyProgress(db) {
             FROM reading_progress_legacy l JOIN books b ON b.id = l.book_id
         `).run(admin.id);
         db.exec('DROP TABLE reading_progress_legacy');
+        normalizeProgressTimes(db);
     })();
 }

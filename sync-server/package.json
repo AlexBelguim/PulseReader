@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node --env-file-if-exists=../.env src/index.js",
     "dev": "node --env-file-if-exists=../.env --watch src/index.js",
-    "test": "node tools/test_paths.mjs && node tools/test_users.mjs && node tools/test_scanner_floor.mjs"
+    "test": "node tools/test_paths.mjs && node tools/test_users.mjs && node tools/test_sync_merge.mjs && node tools/test_scanner_floor.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",

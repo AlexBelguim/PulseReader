@@ -43,7 +43,7 @@ const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onC
 
     const pullIntoDevice = () => pullProgress(
         books,
-        (id, location, progress) => updateBookProgress(id, location, progress),
+        (id, location, progress, at) => updateBookProgress(id, location, progress, at),
         (id, updates) => updateBook(id, updates),
     );
 
@@ -116,8 +116,8 @@ const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onC
                     const id = await addBook(bookData);
                     return id;
                 },
-                async (id, location, progress) => {
-                    await updateBookProgress(id, location, progress);
+                async (id, location, progress, at) => {
+                    await updateBookProgress(id, location, progress, at);
                 },
                 async (id, updates) => {
                     await updateBook(id, updates);
@@ -163,8 +163,8 @@ const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onC
         try {
             const result = await pullProgress(
                 books,
-                async (id, location, progress) => {
-                    await updateBookProgress(id, location, progress);
+                async (id, location, progress, at) => {
+                    await updateBookProgress(id, location, progress, at);
                 },
                 async (id, updates) => {
                     await updateBook(id, updates);
@@ -172,7 +172,12 @@ const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onC
             );
             setSyncResult(
                 result.synced
-                    ? { synced: true, message: `Pulled progress for ${result.pulled} book(s)`, errors: result.errors }
+                    ? {
+                        synced: true,
+                        message: `Pulled progress for ${result.pulled} book(s)` +
+                            (result.keptLocal ? `; kept this device's newer progress for ${result.keptLocal}` : ''),
+                        errors: result.errors,
+                    }
                     : result
             );
             if (result.synced && onSyncComplete) onSyncComplete(result);
@@ -360,7 +365,9 @@ const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onC
                     <div className="sync-section">
                         <h3>Reading Progress</h3>
                         <p className="sync-hint">
-                            Choose when to save or load progress — nothing syncs automatically.
+                            Nothing syncs automatically. Pull and Full Sync keep whichever was read
+                            most recently, per book, so reading done offline is never lost. Push makes
+                            the server match this device.
                         </p>
 
                         <div className="sync-actions-row">
@@ -368,7 +375,7 @@ const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onC
                                 className="btn btn-primary btn-full"
                                 onClick={handlePush}
                                 disabled={syncing}
-                                title="Send this device's reading position and read-state to the server"
+                                title="Make the server match this device's reading positions and read-state"
                             >
                                 <Upload size={16} />
                                 Push progress
@@ -378,7 +385,7 @@ const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onC
                                 className="btn btn-secondary btn-full"
                                 onClick={handlePull}
                                 disabled={syncing}
-                                title="Load reading position and read-state from the server"
+                                title="Load positions and read-state from the server where they are newer than this device's"
                             >
                                 <Download size={16} />
                                 Pull progress

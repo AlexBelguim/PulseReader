@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { SQL_NOW } from '../progressMerge.js';
 
 /** The signed-in user's reading progress. */
 export function progressRouter(db) {
@@ -60,11 +61,11 @@ export function progressRouter(db) {
 
             db.prepare(`
                 INSERT INTO reading_progress (user_id, book_id, location, progress, updated_at)
-                VALUES (?, ?, ?, ?, datetime('now'))
+                VALUES (?, ?, ?, ?, ${SQL_NOW})
                 ON CONFLICT(user_id, book_id) DO UPDATE SET
                     location = excluded.location,
                     progress = excluded.progress,
-                    updated_at = datetime('now')
+                    updated_at = ${SQL_NOW}
             `).run(req.user.id, bookId, location, progress);
 
             const updated = db.prepare(

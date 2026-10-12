@@ -237,9 +237,85 @@ export async function pushBookState(book) {
         book_id: book.syncId,
         is_read: !!book.isRead,
         read_state_only: true,
-        updated_at: new Date().toISOString(),
+        read_updated_at: new Date().toISOString(),
     }], true);
 }
+
+// ---- Most recent reading wins ----
+//
+// Every position and read flag carries the time the reader actually changed
+// it on a device (db.js sets them; syncing never moves them). Pull and Full
+// Sync keep whichever side is newer, per book and per field, so reading done
+// offline -- on a plane -- survives whichever button is pressed after
+// landing, and re-reading an earlier chapter sticks. Push still means "make
+// the server match this device".
+
+const toTime = (value) => {
+    if (!value) return NaN;
+    // SQLite's datetime('now') shape, from servers before times were ISO.
+    const s = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? value.replace(' ', 'T') + 'Z' : value;
+    return Date.parse(s);
+};
+
+/** Is time `a` known and later than `b`? An unknown `b` loses to any known `a`. */
+export function isNewer(a, b) {
+    const ta = toTime(a);
+    if (!Number.isFinite(ta)) return false;
+    const tb = toTime(b);
+    return !Number.isFinite(tb) || ta > tb;
+}
+
+/**
+ * What of the server's state should replace this device's, for one book.
+ * `server`: { location, progress, updatedAt, isRead, readAt }.
+ * Returns { position: { cfi, progress, at } | null, read: { isRead, at } | null }.
+ */
+export function planFromServer(local, server) {
+    const position = server.location && isNewer(server.updatedAt, local.progressAt)
+        ? { cfi: server.location, progress: server.progress || 0, at: server.updatedAt }
+        : null;
+
+    let read = null;
+    if (server.readAt) {
+        if (isNewer(server.readAt, local.readAt) && !!server.isRead !== !!local.isRead) {
+            read = { isRead: !!server.isRead, at: server.readAt };
+        }
+    } else if (server.isRead && !local.isRead && !local.readAt) {
+        // A server from before read-state had a time: "read" was sticky.
+        read = { isRead: true, at: null };
+    }
+    return { position, read };
+}
+
+const fromStatusRow = (b) => ({
+    location: b.last_read, progress: b.progress, updatedAt: b.progress_updated_at,
+    isRead: b.is_read === 1, readAt: b.read_updated_at,
+});
+const fromProgressRow = (r) => ({
+    location: r.location, progress: r.progress, updatedAt: r.updated_at,
+    isRead: r.is_read === 1, readAt: r.read_updated_at,
+});
+
+/** Apply a plan locally; returns true when anything changed. */
+async function applyPlan(localBook, plan, updateProgressFn, updateBookFn) {
+    if (plan.position) {
+        await updateProgressFn(localBook.id, plan.position.cfi, plan.position.progress, plan.position.at);
+    }
+    if (plan.read) {
+        await updateBookFn(localBook.id, { isRead: plan.read.isRead, readAt: plan.read.at });
+    }
+    return !!(plan.position || plan.read);
+}
+
+/** What this device knows about a book, in the shape the server takes. */
+const toUpdate = (localBook, serverId) => ({
+    book_id: serverId,
+    location: localBook.lastRead || null,
+    progress: localBook.progress || 0,
+    is_read: !!localBook.isRead,
+    updated_at: localBook.progressAt || null,
+    read_updated_at: localBook.readAt || null,
+});
 
 /**
  * Match local books to server books by syncId, then title, then file size.
@@ -317,13 +393,7 @@ export async function pushProgress(localBooks, updateBookFn) {
                 (localBook.progress ?? 0) > 0 || localBook.isRead || !!localBook.lastRead;
             if (!hasLocalState) continue;
 
-            updates.push({
-                book_id: serverBook.id,
-                location: localBook.lastRead || null,
-                progress: localBook.progress || 0,
-                is_read: localBook.isRead || false,
-                updated_at: new Date().toISOString(),
-            });
+            updates.push(toUpdate(localBook, serverBook.id));
         }
 
         if (updates.length > 0) {
@@ -338,16 +408,16 @@ export async function pushProgress(localBooks, updateBookFn) {
 
 /**
  * PULL — take the server's reading progress + read-state down to local.
- * Progress only: never uploads/downloads book files. For matched books that
- * have a progress row on the server, local is overwritten to mirror it
- * (so read-state can also be cleared from another device).
+ * Progress only: never uploads/downloads book files. Per book, the server's
+ * position and read flag replace this device's only when they are newer, so
+ * pulling before pushing no longer throws away reading done offline.
  */
 export async function pullProgress(localBooks, updateProgressFn, updateBookFn) {
     if (!isServerConnected()) {
         return { synced: false, reason: 'Not signed in to the PulseReader server' };
     }
 
-    const result = { pulled: 0, errors: [] };
+    const result = { pulled: 0, keptLocal: 0, errors: [] };
     try {
         const serverStatus = await getSyncStatus();
         const pairs = matchLocalToServer(localBooks, serverStatus.books);
@@ -357,20 +427,11 @@ export async function pullProgress(localBooks, updateProgressFn, updateBookFn) {
                 try { await updateBookFn(localBook.id, { syncId: serverBook.id }); } catch { /* ignore */ }
             }
 
-            // A non-null progress timestamp means the server actually has a
-            // reading_progress row for this book.
-            const hasServerRow = serverBook.progress_updated_at != null;
-            if (!hasServerRow) continue;
-
             try {
-                // A row can hold read-state alone (marked read on a device
-                // that never opened the book). Then there is no position to
-                // take, and writing its 0% would reset this device's.
-                if (serverBook.last_read) {
-                    await updateProgressFn(localBook.id, serverBook.last_read, serverBook.progress || 0);
-                }
-                await updateBookFn(localBook.id, { isRead: serverBook.is_read === 1 });
-                result.pulled++;
+                const server = fromStatusRow(serverBook);
+                const changed = await applyPlan(localBook, planFromServer(localBook, server), updateProgressFn, updateBookFn);
+                if (changed) result.pulled++;
+                else if (server.location && localBook.lastRead && server.location !== localBook.lastRead) result.keptLocal++;
             } catch (err) {
                 result.errors.push(`Failed to update "${localBook.title}": ${err.message}`);
             }
@@ -522,10 +583,7 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
                 updates.series = serverBook.series;
             }
 
-            // Sync isRead from server if server has it marked as read
-            if (serverBook.is_read && !localBook.isRead) {
-                updates.isRead = true;
-            }
+            // Read-state is reconciled with the position in step 4, newest wins.
 
             if (!localBook.cover && serverBook.cover_path) {
                 try {
@@ -573,6 +631,10 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
                     progress: serverBook.progress || 0,
                     lastRead: serverBook.last_read || null,
                     isRead: serverBook.is_read === 1,
+                    // The server's own times, so this device never claims
+                    // reading it didn't do.
+                    progressAt: serverBook.progress_updated_at || null,
+                    readAt: serverBook.read_updated_at || null,
                     syncId: serverBook.id,
                 });
 
@@ -642,40 +704,31 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
             }
         }
 
-        // --- Step 4: Sync reading progress ---
+        // --- Step 4: Sync reading progress, both ways, newest wins ---
+        // Send what this device has (with the times it was read); the server
+        // keeps the newer side per book. Then take back whatever the server
+        // ended up with that is newer than this device's.
         const progressUpdates = [];
         for (const { localBook, serverBook } of matchedPairs) {
-            if (localBook.progress > 0 || localBook.isRead) {
-                progressUpdates.push({
-                    book_id: serverBook.id,
-                    location: localBook.lastRead,
-                    progress: localBook.progress,
-                    is_read: localBook.isRead || false,
-                    updated_at: new Date().toISOString(),
-                });
+            if (localBook.lastRead || localBook.isRead || localBook.readAt) {
+                progressUpdates.push(toUpdate(localBook, serverBook.id));
             }
         }
 
         // Always call syncProgress (even with empty array) so we receive
-        // the server's current state, including is_read flags set by other devices
+        // the server's current state, including changes from other devices.
         const syncResult = await syncProgress(progressUpdates);
 
-        if (syncResult.progress) {
-            for (const serverProgress of syncResult.progress) {
-                const matched = matchedPairs.find((p) => p.serverBook.id === serverProgress.book_id);
-                if (!matched) continue;
-
-                // Update local progress if server has higher progress
-                if (serverProgress.progress > matched.localBook.progress) {
-                    await updateProgressFn(matched.localBook.id, serverProgress.location, serverProgress.progress);
+        for (const row of syncResult.progress || []) {
+            const matched = matchedPairs.find((p) => p.serverBook.id === row.book_id);
+            if (!matched) continue;
+            try {
+                const plan = planFromServer(matched.localBook, fromProgressRow(row));
+                if (await applyPlan(matched.localBook, plan, updateProgressFn, updateBookFn)) {
                     results.progressSynced++;
                 }
-
-                // Update local isRead if server has it marked as read
-                if (serverProgress.is_read && !matched.localBook.isRead) {
-                    await updateBookFn(matched.localBook.id, { isRead: true });
-                    results.progressSynced++;
-                }
+            } catch (err) {
+                results.errors.push(`Failed to update "${matched.localBook.title}": ${err.message}`);
             }
         }
 

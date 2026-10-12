@@ -60,7 +60,7 @@ export const whenProgressSaved = () => progressQueue;
 
 export const addBook = async (bookData) => {
     const db = await initDB();
-    const { progress, lastRead, isRead, ...rest } = bookData;
+    const { progress, lastRead, isRead, progressAt, readAt, ...rest } = bookData;
     const id = await db.add('books', {
         ...rest,
         addedAt: new Date(),
@@ -68,10 +68,14 @@ export const addBook = async (bookData) => {
     // Seed the progress store if the incoming book carried any reading state
     // (e.g. downloaded from the sync server).
     if (progress || lastRead || isRead) {
+        // The server's times come along (null when unknown), so a freshly
+        // downloaded book never claims to have been read on this device.
         await saveProgress(id, {
             cfi: lastRead || null,
             percentage: progress || 0,
             isRead: isRead || false,
+            updatedAt: progressAt ?? null,
+            readAt: readAt ?? null,
         });
     }
     return id;
@@ -95,6 +99,10 @@ export const getBooks = async () => {
             progress: p.percentage ?? b.progress ?? 0,
             isRead: p.isRead ?? b.isRead ?? false,
             lastRead: p.cfi ?? b.lastRead ?? null,
+            // When the position / read flag last changed on this device;
+            // sync compares these to keep the more recent side.
+            progressAt: p.updatedAt ?? null,
+            readAt: p.readAt ?? null,
         };
     });
 };
@@ -109,12 +117,14 @@ export const updateBook = async (id, updates) => {
 
     // Route reading-state fields to the progress store so we never rewrite
     // the book blob just to flip a flag.
-    const { isRead, progress, lastRead, ...bookUpdates } = updates;
+    const { isRead, progress, lastRead, progressAt, readAt, ...bookUpdates } = updates;
     if (isRead !== undefined || progress !== undefined || lastRead !== undefined) {
         await saveProgress(id, {
             ...(isRead !== undefined ? { isRead } : {}),
             ...(progress !== undefined ? { percentage: progress } : {}),
             ...(lastRead !== undefined ? { cfi: lastRead } : {}),
+            ...(progressAt !== undefined ? { updatedAt: progressAt } : {}),
+            ...(readAt !== undefined ? { readAt } : {}),
         });
     }
 
@@ -162,13 +172,21 @@ export const getAllProgress = async () => {
 export const saveProgress = (bookId, fields = {}) =>
     queueProgressWrite(() => writeProgress(bookId, fields));
 
-const writeProgress = async (bookId, { cfi, percentage, isRead, updatedAt }) => {
+const writeProgress = async (bookId, { cfi, percentage, isRead, updatedAt, readAt }) => {
     const db = await initDB();
     // Base on getProgress rather than a raw store read, so the pre-v4 fallback
     // (position still on the book record) is part of the merge. Reading only
     // the progress store meant marking a legacy book read wrote cfi:null over a
     // position that was sitting right there on the record.
     const existing = (await getProgress(bookId)) || { bookId };
+    const now = new Date().toISOString();
+    // The times sync compares (most recent wins). They move only when the
+    // reader actually did something: the position changed, or the read flag
+    // flipped. Backfilling a percentage once the page map is built, or
+    // opening the book, must not make an old position look new. Callers that
+    // copy state from the server pass the server's times explicitly.
+    const movedPosition = cfi != null && cfi !== existing.cfi;
+    const flippedRead = isRead !== undefined && isRead !== (existing.isRead ?? false);
     const next = {
         bookId,
         // null is "no position to report", not "the user is at the start".
@@ -179,15 +197,21 @@ const writeProgress = async (bookId, { cfi, percentage, isRead, updatedAt }) => 
         cfi: cfi !== undefined && cfi !== null ? cfi : existing.cfi ?? null,
         percentage: percentage !== undefined ? percentage : existing.percentage ?? 0,
         isRead: isRead !== undefined ? isRead : existing.isRead ?? false,
-        updatedAt: updatedAt || new Date().toISOString(),
+        updatedAt: updatedAt !== undefined ? updatedAt : movedPosition ? now : existing.updatedAt ?? null,
+        readAt: readAt !== undefined ? readAt : flippedRead ? now : existing.readAt ?? null,
     };
     await db.put('progress', next);
     return next;
 };
 
-export const updateBookProgress = async (id, location, progress) => {
+export const updateBookProgress = async (id, location, progress, updatedAt) => {
     // Lightweight: writes only the small progress record, not the book blob.
-    await saveProgress(id, { cfi: location, percentage: progress });
+    // updatedAt only when copying from the server; reading leaves it out.
+    await saveProgress(id, {
+        cfi: location,
+        percentage: progress,
+        ...(updatedAt !== undefined ? { updatedAt } : {}),
+    });
 };
 
 export const toggleBookRead = async (id) => {
@@ -210,7 +234,7 @@ export const resetAllProgress = () => queueProgressWrite(async () => {
     const ids = await db.getAllKeys('books');
     const tx = db.transaction('progress', 'readwrite');
     await Promise.all([
-        ...ids.map((bookId) => tx.store.put({ bookId, cfi: null, percentage: 0, isRead: false, updatedAt: null })),
+        ...ids.map((bookId) => tx.store.put({ bookId, cfi: null, percentage: 0, isRead: false, updatedAt: null, readAt: null })),
         tx.done,
     ]);
 });

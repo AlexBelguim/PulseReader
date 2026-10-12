@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { normalizeProgressTimes } from './progressMerge.js';
 
 export function initDB(dbPath) {
     const db = new Database(dbPath);
@@ -66,12 +67,19 @@ export function initDB(dbPath) {
             location TEXT,
             progress REAL DEFAULT 0,
             is_read INTEGER DEFAULT 0,
-            updated_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT,          -- when the position was read (device time)
+            read_updated_at TEXT,     -- when is_read was last changed
             PRIMARY KEY (user_id, book_id),
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
             FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
         );
     `);
+
+    // Read-state got its own time when sync moved to "most recent wins".
+    if (!db.prepare('PRAGMA table_info(reading_progress)').all().some((c) => c.name === 'read_updated_at')) {
+        db.exec('ALTER TABLE reading_progress ADD COLUMN read_updated_at TEXT');
+    }
+    normalizeProgressTimes(db);
 
     return db;
 }
