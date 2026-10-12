@@ -1,144 +1,73 @@
-# PulseReader Sync Server
+# PulseReader server
 
-A lightweight, self-hosted sync server for PulseReader. Run it on your TrueNAS, Raspberry Pi, or any Docker host to sync your epub library and reading progress across devices.
+The Express + SQLite server behind PulseReader. It serves the built web app,
+indexes the epubs in the books folder (one folder per series), and stores
+reading progress so every device can sync.
 
-## Features
+You normally don't run this directly: the Docker image in the repo root builds
+the web app and this server together. See the [main README](../README.md) for
+setup.
 
-- **File-based library**: Organize epubs in folders by series — the server scans and indexes them automatically
-- **Custom covers**: Drop a `cover.jpg` in a series folder, or name it the same as the epub
-- **Reading progress sync**: Last-write-wins conflict resolution across devices
-- **Simple API key auth**: Secure your server with a single API key
-- **Docker-ready**: Runs as a lightweight container (~50MB)
-
-## Folder Structure
-
-Place your epub files in the `books/` directory (or the mounted volume):
-
-```
-books/
-  Mushoku Tensei/
-    cover.jpg                              ← optional series cover
-    Mushoku Tensei Vol 1.epub
-    Mushoku Tensei Vol 2.epub
-  That Time I Got Reincarnated as a Slime/
-    That Time I Got Reincarnated as a Slime Vol 1.epub
-    That Time I Got Reincarnated as a Slime Vol 1.jpg  ← optional per-book cover
-    That Time I Got Reincarnated as a Slime Vol 2.epub
-  Standalone Book.epub                     ← books in root go to "Uncategorized"
-```
-
-### Cover Image Priority
-1. Per-book cover: `BookTitle.jpg` (same name as the epub)
-2. Series cover: `cover.jpg` in the series folder
-3. No cover: PulseReader will extract one from the epub metadata
-
-Supported image formats: `.jpg`, `.jpeg`, `.png`, `.webp`
-
-## Quick Start with Docker Compose
-
-```yaml
-version: '3.8'
-services:
-  pulsereader-sync:
-    build: .
-    container_name: pulsereader-sync
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    volumes:
-      - /path/to/your/books:/data/books
-      - pulsereader-db:/data/db
-    environment:
-      - API_KEY=your-secure-api-key-here
-
-volumes:
-  pulsereader-db:
-```
-
-```bash
-docker compose up -d
-```
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `3000` | Server port |
-| `API_KEY` | *(empty)* | API key for authentication. **Set this!** |
-| `BOOKS_DIR` | `/data/books` | Path to the books directory |
-| `DATA_DIR` | `/data` | Path to the data directory (contains db) |
-
-## TrueNAS SCALE Setup
-
-1. Create a dataset for your books (e.g., `tank/media/books`)
-2. Create a dataset for the database (e.g., `tank/apps/pulsereader`)
-3. Deploy as a custom Docker app:
-   - Image: Build from this directory or push to your registry
-   - Port: `3000:3000`
-   - Volume: `/mnt/tank/media/books` → `/data/books`
-   - Volume: `/mnt/tank/apps/pulsereader` → `/data/db`
-   - Environment: `API_KEY=your-secure-key`
-
-## API Endpoints
-
-### Health Check
-```
-GET /health
-```
-
-### Books
-```
-GET    /api/books              # List all books
-GET    /api/books/:id          # Get book metadata
-GET    /api/books/:id/download # Download epub file
-GET    /api/books/:id/cover    # Get cover image
-POST   /api/books              # Upload new book (multipart: epub + cover)
-PUT    /api/books/:id          # Update metadata
-DELETE /api/books/:id          # Delete book (?deleteFile=true to remove from disk)
-```
-
-### Reading Progress
-```
-GET  /api/progress             # Get all progress
-GET  /api/progress/:bookId     # Get progress for a book
-PUT  /api/progress/:bookId     # Update progress
-```
-
-### Sync
-```
-GET  /api/sync/status          # Get full sync status (books + progress)
-POST /api/sync/rescan          # Rescan books folder
-POST /api/sync/progress        # Batch sync progress
-```
-
-### Authentication
-
-All `/api/*` endpoints require authentication when `API_KEY` is set.
-
-Include the key in your request:
-```
-X-API-Key: your-api-key
-```
-or
-```
-Authorization: Bearer your-api-key
-```
-
-## Connecting from PulseReader
-
-1. Open PulseReader in your browser
-2. Click the **Sync** button in the library
-3. Enter your server URL (e.g., `http://192.168.1.50:3000`)
-4. Enter your API key
-5. Click **Test Connection** to verify
-6. Enable sync and optionally enable auto-sync
-7. Click **Sync Now** to perform the first sync
-
-## Development
+## Running from a checkout
 
 ```bash
 npm install
-npm run dev
+npm run dev        # reads ../.env, restarts on change
 ```
 
-The server will start with file watching enabled for development.
+Without a built app (`npm run build` in the repo root) the server runs API-only.
+
+| Variable | Default | |
+|---|---|---|
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / *(required on first start)* | First admin account. |
+| `API_KEY` | *(off)* | Script key; requests with it act as the first admin. Also the admin password when upgrading from before accounts. |
+| `PORT` | `3000` | |
+| `BOOKS_DIR` | `./data/books` | Epub library, one folder per series. |
+| `DATA_DIR` | `./data` | The database is kept in `DATA_DIR/db/`. |
+| `WEB_DIR` | `../dist` | Built web app to serve. |
+| `TRUST_PROXY` | `loopback, uniquelocal` | Express `trust proxy` setting. |
+| `CORS_ORIGIN` | *(off)* | Comma-separated origins allowed to call the API cross-origin. |
+
+## API
+
+Everything under `/api` needs either the session cookie from signing in or
+`API_KEY` as `X-API-Key: <key>` / `Authorization: Bearer <key>` (for scripts).
+Reading progress is per user. Routes marked *admin* return 403 for readers.
+
+```
+GET    /health                    # { status, app, version }, no auth
+
+GET    /api/auth/me               # { authenticated, user }
+POST   /api/auth/login            # { username, password } -> sets session cookie
+POST   /api/auth/logout
+PUT    /api/auth/password         # { currentPassword, newPassword }
+
+GET    /api/users                 # admin
+POST   /api/users                 # admin: { username, password, role }
+PUT    /api/users/:id             # admin: { role?, password? }
+DELETE /api/users/:id             # admin
+
+GET    /api/books                 # all books with progress
+GET    /api/books/:id
+GET    /api/books/:id/download    # the epub
+GET    /api/books/:id/cover
+POST   /api/books                 # multipart: title, author, series, epub, cover
+PUT    /api/books/:id             # admin: { title?, author?, series? } (series moves the file)
+PUT    /api/books/:id/cover       # multipart: cover
+PUT    /api/books/series/rename   # admin: { oldName, newName } (moves the folder)
+DELETE /api/books/:id             # admin; ?deleteFile=true also removes it from disk
+
+GET    /api/progress
+GET    /api/progress/:bookId
+PUT    /api/progress/:bookId      # { location, progress }
+
+GET    /api/sync/status           # books + progress for the client to reconcile
+POST   /api/sync/rescan           # rescan the books folder
+POST   /api/sync/progress         # { progress: [...], force }
+```
+
+## Tests
+
+```bash
+npm test
+```

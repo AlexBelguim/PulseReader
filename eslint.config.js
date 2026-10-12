@@ -5,9 +5,9 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  globalIgnores(['dist', '**/node_modules']),
   {
-    files: ['**/*.{js,jsx}'],
+    files: ['src/**/*.{js,jsx}'],
     extends: [
       js.configs.recommended,
       reactHooks.configs.flat.recommended,
@@ -23,7 +23,22 @@ export default defineConfig([
       },
     },
     rules: {
-      'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+      // Core no-unused-vars doesn't see JSX member usage like <motion.div>,
+      // so framer-motion's `motion` import is allowed alongside components.
+      'no-unused-vars': ['error', { varsIgnorePattern: '^([A-Z_]|motion$)', caughtErrors: 'none' }],
+    },
+  },
+  {
+    // The sync server, test scripts and build config run in Node.
+    files: ['sync-server/**/*.{js,mjs}', 'tools/**/*.mjs', '*.config.js'],
+    extends: [js.configs.recommended],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: globals.node,
+    },
+    rules: {
+      'no-unused-vars': ['error', { caughtErrors: 'none' }],
     },
   },
 ])
