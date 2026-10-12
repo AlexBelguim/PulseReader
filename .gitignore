@@ -26,3 +26,13 @@ dist-ssr
 # Sync server data
 sync-server/data
 sync-server/node_modules
+
+# Local config and data (never commit)
+.env
+.env.*
+!.env.example
+docker-compose.override.yml
+/books
+/data
+# Old per-folder compose file; may hold a real key. Use the root docker-compose.yml + .env.
+sync-server/docker-compose.yml

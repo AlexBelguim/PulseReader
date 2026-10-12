@@ -22,7 +22,13 @@ import {
     updateBook,
     toggleBookRead,
 } from '../services/db';
-import { getSyncConfig, renameSeries, updateServerBook } from '../services/syncService';
+import {
+    getServerStatus,
+    isServerConnected,
+    pushBookState,
+    renameSeries,
+    updateServerBook,
+} from '../services/syncService';
 import SyncSettings from './SyncSettings';
 
 const Library = () => {
@@ -43,6 +49,23 @@ const Library = () => {
     const [renameSeriesInput, setRenameSeriesInput] = useState('');
     const [editingAuthor, setEditingAuthor] = useState(null); // book id for author edit
     const [authorInput, setAuthorInput] = useState('');
+    const [serverStatus, setServerStatus] = useState({ available: false, authenticated: false });
+    const [actionError, setActionError] = useState(null);
+
+    // Find out whether this copy is served by a PulseReader server, and if so
+    // whether we're signed in. The library works locally either way.
+    useEffect(() => {
+        getServerStatus().then(setServerStatus);
+    }, []);
+
+    // Series and author live on the server, and only admins may change them
+    // there. Offline, or with no server at all, the library is yours to edit.
+    const canEditLibrary = !serverStatus.authenticated || serverStatus.user?.role === 'admin';
+
+    const showActionError = (message) => {
+        setActionError(message);
+        setTimeout(() => setActionError(null), 5000);
+    };
 
     // Load books from IndexedDB
     useEffect(() => {
@@ -284,9 +307,31 @@ const Library = () => {
         setBooks((prev) =>
             prev.map((b) => (b.id === id ? { ...b, isRead: newState } : b))
         );
+
+        // Write read-state through to the server right away; otherwise the
+        // next Full Sync or Pull on another device never hears about it.
+        const book = books.find((b) => b.id === id);
+        try {
+            await pushBookState({ ...book, isRead: newState });
+        } catch (err) {
+            showActionError(`Marked locally, but the server didn't save it: ${err.message}`);
+        }
     };
 
     const handleSeriesChange = async (bookId, newSeries) => {
+        // The server is the source of truth for series (it's the folder on
+        // disk), so a change made only locally is reverted by the next Full
+        // Sync. Move it on the server first and keep the name it settled on.
+        const book = books.find((b) => b.id === bookId);
+        if (book?.syncId && isServerConnected()) {
+            try {
+                const updated = await updateServerBook(book.syncId, { series: newSeries });
+                newSeries = updated.series || newSeries;
+            } catch (err) {
+                showActionError(`Couldn't move the book on the server: ${err.message}`);
+                return;
+            }
+        }
         await updateBook(bookId, { series: newSeries });
         setBooks((prev) =>
             prev.map((b) => (b.id === bookId ? { ...b, series: newSeries } : b))
@@ -298,12 +343,17 @@ const Library = () => {
     const handleRenameSeries = async (oldName, newName) => {
         if (!oldName || !newName || oldName === newName) return;
 
-        const config = getSyncConfig();
-        if (config.serverUrl) {
+        // Rename on the server first. If that fails, stop: renaming only
+        // locally looks like it worked until the next Full Sync puts the old
+        // name back, which is exactly how this used to break.
+        const onServer = books.some((b) => b.series === oldName && b.syncId);
+        if (onServer && isServerConnected()) {
             try {
-                await renameSeries(oldName, newName);
+                const result = await renameSeries(oldName, newName);
+                newName = result.series || newName;
             } catch (err) {
-                console.error('Failed to rename series on server:', err);
+                showActionError(`Couldn't rename the series on the server: ${err.message}`);
+                return;
             }
         }
 
@@ -338,12 +388,11 @@ const Library = () => {
         // Update on server if synced
         const book = books.find((b) => b.id === bookId);
         if (book?.syncId) {
-            const config = getSyncConfig();
-            if (config.serverUrl) {
+            if (isServerConnected()) {
                 try {
                     await updateServerBook(book.syncId, { author: newAuthor });
                 } catch (err) {
-                    console.error('Failed to update author on server:', err);
+                    showActionError(`Couldn't update the author on the server: ${err.message}`);
                 }
             }
         }
@@ -443,28 +492,32 @@ const Library = () => {
                                         >
                                             <ImagePlus size={14} />
                                         </button>
-                                        <button
-                                            className="book-action-btn"
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                setEditingAuthor(book.id);
-                                                setAuthorInput(book.author || '');
-                                            }}
-                                            title="Set author"
-                                        >
-                                            <User size={14} />
-                                        </button>
-                                        <button
-                                            className="book-action-btn"
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                setEditingSeries(book.id);
-                                                setSeriesInput(book.series || '');
-                                            }}
-                                            title="Change series"
-                                        >
-                                            <Edit3 size={14} />
-                                        </button>
+                                        {canEditLibrary && (
+                                            <>
+                                                <button
+                                                    className="book-action-btn"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        setEditingAuthor(book.id);
+                                                        setAuthorInput(book.author || '');
+                                                    }}
+                                                    title="Set author"
+                                                >
+                                                    <User size={14} />
+                                                </button>
+                                                <button
+                                                    className="book-action-btn"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        setEditingSeries(book.id);
+                                                        setSeriesInput(book.series || '');
+                                                    }}
+                                                    title="Change series"
+                                                >
+                                                    <Edit3 size={14} />
+                                                </button>
+                                            </>
+                                        )}
                                         <button
                                             className="book-action-btn danger"
                                             onClick={(e) => {
@@ -568,7 +621,7 @@ const Library = () => {
                                     )}
 
                                     {/* Rename series button */}
-                                    <div className="book-actions-overlay">
+                                    {canEditLibrary && <div className="book-actions-overlay">
                                         <button
                                             className="book-action-btn"
                                             onClick={(e) => {
@@ -580,7 +633,7 @@ const Library = () => {
                                         >
                                             <Edit3 size={14} />
                                         </button>
-                                    </div>
+                                    </div>}
                                 </div>
 
                                 <div className="book-info">
@@ -633,14 +686,16 @@ const Library = () => {
                             />
                         </label>
 
-                        <button
-                            className="btn btn-secondary sync-btn"
-                            onClick={() => setShowSyncSettings(true)}
-                            title="Sync Server Settings"
-                        >
-                            <Server size={20} />
-                            Sync
-                        </button>
+                        {serverStatus.available && (
+                            <button
+                                className="btn btn-secondary sync-btn"
+                                onClick={() => setShowSyncSettings(true)}
+                                title={serverStatus.authenticated ? 'Sync with server' : 'Sign in to sync'}
+                            >
+                                <Server size={20} />
+                                {serverStatus.authenticated ? 'Sync' : 'Sign in'}
+                            </button>
+                        )}
                     </div>
                 )}
 
@@ -894,9 +949,26 @@ const Library = () => {
                 {showSyncSettings && (
                     <SyncSettings
                         books={books}
+                        serverStatus={serverStatus}
+                        onStatusChange={setServerStatus}
                         onSyncComplete={handleSyncComplete}
                         onClose={() => setShowSyncSettings(false)}
                     />
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {actionError && (
+                    <motion.div
+                        className="library-toast sync-result error"
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                        onClick={() => setActionError(null)}
+                    >
+                        <AlertCircle size={16} />
+                        <span>{actionError}</span>
+                    </motion.div>
                 )}
             </AnimatePresence>
         </div>

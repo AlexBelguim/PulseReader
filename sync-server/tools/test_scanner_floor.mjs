@@ -4,7 +4,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import Database from 'better-sqlite3';
 import { initDB } from '../src/db.js';
 import { scanBooksFolder } from '../src/scanner.js';
 
@@ -16,14 +15,15 @@ const booksDir = path.join(tmp, 'books');
 fs.mkdirSync(booksDir, { recursive: true });
 
 const db = initDB(path.join(tmp, 'test.db'));
+db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES (1, 'reader', 'x', 'admin')").run();
 db.prepare(`INSERT INTO books (id,title,author,series,filename,filepath,file_hash,file_size)
             VALUES ('b1','Dune','Herbert','SciFi','Dune.epub',?,'h1',10)`).run(path.join('SciFi', 'Dune.epub'));
 db.prepare(`INSERT INTO books (id,title,author,series,filename,filepath,file_hash,file_size)
             VALUES ('b2','Neuromancer','Gibson','SciFi','Neuro.epub',?,'h2',10)`).run(path.join('SciFi', 'Neuro.epub'));
-db.prepare(`INSERT INTO reading_progress (book_id,location,progress,is_read,updated_at)
-            VALUES ('b1','epubcfi(/6/14!/4/2/16)',0.62,0,'2026-01-01T00:00:00Z')`).run();
-db.prepare(`INSERT INTO reading_progress (book_id,location,progress,is_read,updated_at)
-            VALUES ('b2','epubcfi(/6/4!/4/2/2)',0.10,0,'2026-01-01T00:00:00Z')`).run();
+db.prepare(`INSERT INTO reading_progress (user_id,book_id,location,progress,is_read,updated_at)
+            VALUES (1,'b1','epubcfi(/6/14!/4/2/16)',0.62,0,'2026-01-01T00:00:00Z')`).run();
+db.prepare(`INSERT INTO reading_progress (user_id,book_id,location,progress,is_read,updated_at)
+            VALUES (1,'b2','epubcfi(/6/4!/4/2/2)',0.10,0,'2026-01-01T00:00:00Z')`).run();
 
 const books = () => db.prepare('SELECT COUNT(*) n FROM books').get().n;
 const prog  = () => db.prepare('SELECT COUNT(*) n FROM reading_progress').get().n;

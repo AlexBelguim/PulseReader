@@ -1,0 +1,27 @@
+# PulseReader
+#
+#   cp .env.example .env    # set API_KEY, and BOOKS_PATH / DATA_PATH if you
+#                           # want them somewhere other than ./books and ./data
+#   docker compose up -d --build
+#
+# Open http://<host>:3000 (or put it behind HTTPS, see README) and sign in
+# with API_KEY. On TrueNAS "Apps -> Custom App -> YAML", use absolute
+# /mnt/... paths for BOOKS_PATH and DATA_PATH.
+services:
+  pulsereader:
+    build: .
+    image: pulsereader:latest
+    container_name: pulsereader
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file: .env
+    environment:
+      BOOKS_DIR: /data/books
+      DATA_DIR: /data
+    volumes:
+      # Your epubs, one folder per series. Read-write: uploads, series renames
+      # and covers are written here.
+      - ${BOOKS_PATH:-./books}:/data/books
+      # The SQLite database (catalog + reading progress).
+      - ${DATA_PATH:-./data}:/data/db

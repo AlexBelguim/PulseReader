@@ -1,64 +1,113 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     Server,
-    Wifi,
-    WifiOff,
     RefreshCw,
     Check,
     X,
     AlertCircle,
-    Settings,
     Download,
     Upload,
     Eye,
     EyeOff,
+    LogIn,
+    LogOut,
+    KeyRound,
 } from 'lucide-react';
 import {
-    getSyncConfig,
-    saveSyncConfig,
-    testConnection,
+    login,
+    logout,
+    claimDevice,
+    changePassword,
     performFullSync,
     pushProgress,
     pullProgress,
     triggerRescan,
 } from '../services/syncService';
-import { addBook, updateBookProgress, updateBook, deleteBook } from '../services/db';
+import { addBook, updateBookProgress, updateBook, deleteBook, resetAllProgress } from '../services/db';
+import UserManagement from './UserManagement';
 
-const SyncSettings = ({ books, onSyncComplete, onClose }) => {
-    const [config, setConfig] = useState(getSyncConfig());
-    const [testing, setTesting] = useState(false);
-    const [testResult, setTestResult] = useState(null);
+const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onClose }) => {
+    const [username, setUsername] = useState('');
+    const [password, setPassword] = useState('');
+    const [showPassword, setShowPassword] = useState(false);
+    const [signingIn, setSigningIn] = useState(false);
+    const [authError, setAuthError] = useState(null);
     const [syncing, setSyncing] = useState(false);
     const [syncResult, setSyncResult] = useState(null);
-    const [showApiKey, setShowApiKey] = useState(false);
+    const [changingPassword, setChangingPassword] = useState(false);
+    const [passwords, setPasswords] = useState({ current: '', next: '' });
+    const [passwordNotice, setPasswordNotice] = useState(null);
+    const connected = serverStatus.authenticated;
+    const user = serverStatus.user;
 
-    const handleConfigChange = (field, value) => {
-        setConfig((prev) => ({ ...prev, [field]: value }));
-        setTestResult(null);
+    const pullIntoDevice = () => pullProgress(
+        books,
+        (id, location, progress) => updateBookProgress(id, location, progress),
+        (id, updates) => updateBook(id, updates),
+    );
+
+    const handleLogin = async (e) => {
+        e.preventDefault();
+        setSigningIn(true);
+        setAuthError(null);
+        try {
+            const { status, previousUser, user: signedIn } = await login(username.trim(), password);
+            setPassword('');
+
+            // This device's progress belongs to whoever synced here last. If
+            // that was someone else, swap it for this account's progress,
+            // otherwise a Push or Full Sync would copy their place in every
+            // book into this account.
+            const switching = previousUser && previousUser.toLowerCase() !== signedIn.username.toLowerCase();
+            if (switching && books.length > 0) {
+                const replace = window.confirm(
+                    `This device has ${previousUser}'s reading progress. Replace it with ${signedIn.username}'s?\n\n` +
+                    `Choose Cancel to keep the progress on this device and add it to ${signedIn.username}'s account.`
+                );
+                if (replace) {
+                    await resetAllProgress();
+                    await pullIntoDevice();
+                    onSyncComplete?.({ synced: true });
+                }
+            }
+            claimDevice(signedIn.username);
+            onStatusChange(status);
+        } catch (err) {
+            setAuthError(err.message);
+        }
+        setSigningIn(false);
     };
 
-    const handleSave = () => {
-        saveSyncConfig(config);
-        setTestResult({ success: true, message: 'Settings saved' });
-        setTimeout(() => setTestResult(null), 2000);
+    const handleLogout = async () => {
+        setAuthError(null);
+        try {
+            // Save where this device is up to before the account goes, so the
+            // next person to sign in here can't lose it.
+            await pushProgress(books, (id, updates) => updateBook(id, updates));
+            onStatusChange(await logout());
+        } catch (err) {
+            setAuthError(err.message);
+        }
     };
 
-    const handleTestConnection = async () => {
-        setTesting(true);
-        setTestResult(null);
-
-        const result = await testConnection(config.serverUrl, config.apiKey);
-        setTestResult(result);
-        setTesting(false);
+    const handleChangePassword = async (e) => {
+        e.preventDefault();
+        setAuthError(null);
+        setPasswordNotice(null);
+        try {
+            await changePassword(passwords.current, passwords.next);
+            setPasswords({ current: '', next: '' });
+            setChangingPassword(false);
+            setPasswordNotice('Password changed. Other devices have been signed out.');
+        } catch (err) {
+            setAuthError(err.message);
+        }
     };
 
     const handleSync = async () => {
         setSyncing(true);
         setSyncResult(null);
-
-        // Save config first
-        saveSyncConfig(config);
 
         try {
             const result = await performFullSync(
@@ -92,7 +141,6 @@ const SyncSettings = ({ books, onSyncComplete, onClose }) => {
     const handlePush = async () => {
         setSyncing(true);
         setSyncResult(null);
-        saveSyncConfig(config);
         try {
             const result = await pushProgress(books, async (id, updates) => {
                 await updateBook(id, updates);
@@ -112,7 +160,6 @@ const SyncSettings = ({ books, onSyncComplete, onClose }) => {
     const handlePull = async () => {
         setSyncing(true);
         setSyncResult(null);
-        saveSyncConfig(config);
         try {
             const result = await pullProgress(
                 books,
@@ -178,87 +225,137 @@ const SyncSettings = ({ books, onSyncComplete, onClose }) => {
                 </div>
 
                 <div className="sync-settings-content">
-                    {/* Connection Settings */}
+                    {/* Account: the server is this app's own host, so all
+                        there is to set up is signing in once per device. */}
                     <div className="sync-section">
-                        <h3>Connection</h3>
+                        <h3>Account</h3>
 
-                        <div className="sync-field">
-                            <label>Server URL</label>
-                            <input
-                                type="url"
-                                placeholder="http://192.168.1.50:3000"
-                                value={config.serverUrl}
-                                onChange={(e) => handleConfigChange('serverUrl', e.target.value)}
-                            />
-                        </div>
+                        {connected ? (
+                            <>
+                                <div className="sync-actions-row">
+                                    <div className="sync-result success">
+                                        <Check size={16} />
+                                        <span>
+                                            Signed in as <b>{user?.username}</b>
+                                            {user?.role === 'admin' ? ' (admin)' : ''}
+                                        </span>
+                                    </div>
+                                    <button className="btn btn-secondary" onClick={handleLogout}>
+                                        <LogOut size={16} />
+                                        Sign out
+                                    </button>
+                                </div>
 
-                        <div className="sync-field">
-                            <label>API Key</label>
-                            <div className="sync-field-with-toggle">
-                                <input
-                                    type={showApiKey ? 'text' : 'password'}
-                                    placeholder="Your API key"
-                                    value={config.apiKey}
-                                    onChange={(e) => handleConfigChange('apiKey', e.target.value)}
-                                />
-                                <button
-                                    className="btn-icon-sm"
-                                    onClick={() => setShowApiKey(!showApiKey)}
-                                >
-                                    {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
-                                </button>
-                            </div>
-                        </div>
-
-                        <div className="sync-actions-row">
-                            <button
-                                className="btn btn-secondary"
-                                onClick={handleTestConnection}
-                                disabled={testing || !config.serverUrl}
-                            >
-                                {testing ? (
-                                    <RefreshCw size={16} className="spinning" />
+                                {changingPassword ? (
+                                    <form className="sync-password-form" onSubmit={handleChangePassword}>
+                                        <input type="text" autoComplete="username" value={user?.username || ''} readOnly hidden />
+                                        <div className="sync-field">
+                                            <input
+                                                type="password"
+                                                autoComplete="current-password"
+                                                placeholder="Current password"
+                                                value={passwords.current}
+                                                onChange={(e) => setPasswords({ ...passwords, current: e.target.value })}
+                                                required
+                                            />
+                                        </div>
+                                        <div className="sync-field">
+                                            <input
+                                                type="password"
+                                                autoComplete="new-password"
+                                                placeholder="New password (8+ characters)"
+                                                value={passwords.next}
+                                                onChange={(e) => setPasswords({ ...passwords, next: e.target.value })}
+                                                minLength={8}
+                                                required
+                                            />
+                                        </div>
+                                        <div className="sync-actions-row">
+                                            <button type="button" className="btn btn-secondary" onClick={() => setChangingPassword(false)}>
+                                                Cancel
+                                            </button>
+                                            <button type="submit" className="btn btn-primary">
+                                                <KeyRound size={16} />
+                                                Change password
+                                            </button>
+                                        </div>
+                                    </form>
                                 ) : (
-                                    <Wifi size={16} />
+                                    <button className="btn btn-secondary btn-full" onClick={() => setChangingPassword(true)}>
+                                        <KeyRound size={16} />
+                                        Change password
+                                    </button>
                                 )}
-                                {testing ? 'Testing...' : 'Test Connection'}
-                            </button>
 
-                            <button
-                                className="btn btn-primary"
-                                onClick={handleSave}
-                                disabled={!config.serverUrl}
-                            >
-                                <Check size={16} />
-                                Save
-                            </button>
-                        </div>
-
-                        {/* Test Result */}
-                        <AnimatePresence>
-                            {testResult && (
-                                <motion.div
-                                    className={`sync-result ${testResult.success ? 'success' : 'error'}`}
-                                    initial={{ opacity: 0, y: -10 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    exit={{ opacity: 0 }}
+                                {passwordNotice && (
+                                    <div className="sync-result success">
+                                        <Check size={16} />
+                                        <span>{passwordNotice}</span>
+                                    </div>
+                                )}
+                            </>
+                        ) : (
+                            // A real <form> with name + autocomplete attributes, so
+                            // password managers offer to save and fill it.
+                            <form onSubmit={handleLogin} action="#" method="post">
+                                <div className="sync-field">
+                                    <label htmlFor="sync-username">Username</label>
+                                    <input
+                                        id="sync-username"
+                                        name="username"
+                                        type="text"
+                                        autoComplete="username"
+                                        autoCapitalize="none"
+                                        spellCheck={false}
+                                        value={username}
+                                        onChange={(e) => setUsername(e.target.value)}
+                                        required
+                                    />
+                                </div>
+                                <div className="sync-field">
+                                    <label htmlFor="sync-password">Password</label>
+                                    <div className="sync-field-with-toggle">
+                                        <input
+                                            id="sync-password"
+                                            name="password"
+                                            type={showPassword ? 'text' : 'password'}
+                                            autoComplete="current-password"
+                                            value={password}
+                                            onChange={(e) => setPassword(e.target.value)}
+                                            required
+                                        />
+                                        <button
+                                            type="button"
+                                            className="btn-icon-sm"
+                                            onClick={() => setShowPassword(!showPassword)}
+                                            aria-label={showPassword ? 'Hide password' : 'Show password'}
+                                        >
+                                            {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                                        </button>
+                                    </div>
+                                </div>
+                                <button
+                                    type="submit"
+                                    className="btn btn-primary btn-full"
+                                    disabled={signingIn || !username.trim() || !password}
                                 >
-                                    {testResult.success ? (
-                                        <>
-                                            <Check size={16} />
-                                            <span>{testResult.message || `Connected (v${testResult.version})`}</span>
-                                        </>
-                                    ) : (
-                                        <>
-                                            <AlertCircle size={16} />
-                                            <span>{testResult.error}</span>
-                                        </>
-                                    )}
-                                </motion.div>
-                            )}
-                        </AnimatePresence>
+                                    {signingIn ? <RefreshCw size={16} className="spinning" /> : <LogIn size={16} />}
+                                    {signingIn ? 'Signing in...' : 'Sign in'}
+                                </button>
+                                <p className="sync-hint">You stay signed in on this device until you sign out.</p>
+                            </form>
+                        )}
+
+                        {authError && (
+                            <div className="sync-result error">
+                                <AlertCircle size={16} />
+                                <span>{authError}</span>
+                            </div>
+                        )}
                     </div>
 
+
+                    {connected && (<>
                     {/* Progress: explicit Push / Pull (no automatic sync on open) */}
                     <div className="sync-section">
                         <h3>Reading Progress</h3>
@@ -270,7 +367,7 @@ const SyncSettings = ({ books, onSyncComplete, onClose }) => {
                             <button
                                 className="btn btn-primary btn-full"
                                 onClick={handlePush}
-                                disabled={syncing || !config.serverUrl}
+                                disabled={syncing}
                                 title="Send this device's reading position and read-state to the server"
                             >
                                 <Upload size={16} />
@@ -280,7 +377,7 @@ const SyncSettings = ({ books, onSyncComplete, onClose }) => {
                             <button
                                 className="btn btn-secondary btn-full"
                                 onClick={handlePull}
-                                disabled={syncing || !config.serverUrl}
+                                disabled={syncing}
                                 title="Load reading position and read-state from the server"
                             >
                                 <Download size={16} />
@@ -297,7 +394,7 @@ const SyncSettings = ({ books, onSyncComplete, onClose }) => {
                             <button
                                 className="btn btn-secondary btn-full"
                                 onClick={handleSync}
-                                disabled={syncing || !config.serverUrl}
+                                disabled={syncing}
                                 title="Download new server books, upload new local books, and reconcile metadata"
                             >
                                 {syncing ? (
@@ -311,7 +408,7 @@ const SyncSettings = ({ books, onSyncComplete, onClose }) => {
                             <button
                                 className="btn btn-secondary btn-full"
                                 onClick={handleRescan}
-                                disabled={syncing || !config.serverUrl}
+                                disabled={syncing}
                             >
                                 <RefreshCw size={16} />
                                 Rescan Server Books Folder
@@ -374,13 +471,16 @@ const SyncSettings = ({ books, onSyncComplete, onClose }) => {
                             )}
                         </AnimatePresence>
                     </div>
+                    </>)}
+
+                    {connected && user?.role === 'admin' && <UserManagement currentUser={user} />}
 
                     {/* Info */}
                     <div className="sync-section sync-info">
-                        <h3>Server Setup</h3>
+                        <h3>Adding books on the server</h3>
                         <p>
-                            Run the PulseReader Sync Server on your TrueNAS or any Docker host.
-                            Place your epub files in the books folder organized by series:
+                            Drop epub files into the server's books folder, one folder per series,
+                            then use Full Sync:
                         </p>
                         <pre className="sync-folder-structure">
 {`books/

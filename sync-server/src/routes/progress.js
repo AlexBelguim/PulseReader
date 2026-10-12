@@ -1,5 +1,6 @@
 import { Router } from 'express';
 
+/** The signed-in user's reading progress. */
 export function progressRouter(db) {
     const router = Router();
 
@@ -10,11 +11,12 @@ export function progressRouter(db) {
     router.get('/', (req, res) => {
         try {
             const progress = db.prepare(`
-                SELECT rp.*, b.title 
+                SELECT rp.*, b.title
                 FROM reading_progress rp
                 JOIN books b ON rp.book_id = b.id
+                WHERE rp.user_id = ?
                 ORDER BY rp.updated_at DESC
-            `).all();
+            `).all(req.user.id);
 
             res.json(progress);
         } catch (err) {
@@ -29,8 +31,8 @@ export function progressRouter(db) {
     router.get('/:bookId', (req, res) => {
         try {
             const progress = db.prepare(
-                'SELECT * FROM reading_progress WHERE book_id = ?'
-            ).get(req.params.bookId);
+                'SELECT * FROM reading_progress WHERE user_id = ? AND book_id = ?'
+            ).get(req.user.id, req.params.bookId);
 
             if (!progress) {
                 return res.status(404).json({ error: 'No progress found for this book' });
@@ -57,17 +59,17 @@ export function progressRouter(db) {
             }
 
             db.prepare(`
-                INSERT INTO reading_progress (book_id, location, progress, updated_at)
-                VALUES (?, ?, ?, datetime('now'))
-                ON CONFLICT(book_id) DO UPDATE SET
+                INSERT INTO reading_progress (user_id, book_id, location, progress, updated_at)
+                VALUES (?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(user_id, book_id) DO UPDATE SET
                     location = excluded.location,
                     progress = excluded.progress,
                     updated_at = datetime('now')
-            `).run(bookId, location, progress);
+            `).run(req.user.id, bookId, location, progress);
 
             const updated = db.prepare(
-                'SELECT * FROM reading_progress WHERE book_id = ?'
-            ).get(bookId);
+                'SELECT * FROM reading_progress WHERE user_id = ? AND book_id = ?'
+            ).get(req.user.id, bookId);
 
             res.json(updated);
         } catch (err) {

@@ -1,12 +1,17 @@
 {
   "name": "pulse-reader",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "Self-hosted EPUB reader PWA with RSVP speed reading and cross-device sync",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite --host",
+    "server": "npm --prefix sync-server run dev",
     "build": "vite build",
+    "start": "npm run build && npm --prefix sync-server start",
     "lint": "eslint .",
+    "test": "node tools/test_tokenize_offsets.mjs && npm --prefix sync-server test",
     "preview": "vite preview"
   },
   "dependencies": {

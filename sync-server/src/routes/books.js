@@ -4,6 +4,8 @@ import path from 'path';
 import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
 import { computeFileHash } from '../scanner.js';
+import { safeSegment, resolveInside } from '../paths.js';
+import { requireAdmin } from '../middleware/auth.js';
 
 export function booksRouter(db, booksDir) {
     const router = Router();
@@ -12,13 +14,13 @@ export function booksRouter(db, booksDir) {
     const upload = multer({
         storage: multer.diskStorage({
             destination: (req, file, cb) => {
-                const series = req.body.series || 'Uncategorized';
-                const seriesDir = path.join(booksDir, series);
+                const seriesDir = resolveInside(booksDir, safeSegment(req.body.series));
                 fs.mkdirSync(seriesDir, { recursive: true });
                 cb(null, seriesDir);
             },
             filename: (req, file, cb) => {
-                cb(null, file.originalname);
+                const ext = path.extname(file.originalname).toLowerCase();
+                cb(null, safeSegment(path.basename(file.originalname, ext), 'book') + ext);
             },
         }),
         limits: { fileSize: 200 * 1024 * 1024 }, // 200MB max
@@ -40,9 +42,9 @@ export function booksRouter(db, booksDir) {
             const books = db.prepare(`
                 SELECT b.*, rp.location as last_read, rp.progress, rp.updated_at as progress_updated_at
                 FROM books b
-                LEFT JOIN reading_progress rp ON b.id = rp.book_id
+                LEFT JOIN reading_progress rp ON b.id = rp.book_id AND rp.user_id = ?
                 ORDER BY b.series, b.title
-            `).all();
+            `).all(req.user.id);
 
             res.json(books);
         } catch (err) {
@@ -59,9 +61,9 @@ export function booksRouter(db, booksDir) {
             const book = db.prepare(`
                 SELECT b.*, rp.location as last_read, rp.progress
                 FROM books b
-                LEFT JOIN reading_progress rp ON b.id = rp.book_id
+                LEFT JOIN reading_progress rp ON b.id = rp.book_id AND rp.user_id = ?
                 WHERE b.id = ?
-            `).get(req.params.id);
+            `).get(req.user.id, req.params.id);
 
             if (!book) {
                 return res.status(404).json({ error: 'Book not found' });
@@ -83,14 +85,14 @@ export function booksRouter(db, booksDir) {
                 return res.status(404).json({ error: 'Book not found' });
             }
 
-            const filePath = path.join(booksDir, book.filepath);
+            const filePath = resolveInside(booksDir, book.filepath);
             if (!fs.existsSync(filePath)) {
                 return res.status(404).json({ error: 'File not found on disk' });
             }
 
             res.setHeader('Content-Type', 'application/epub+zip');
-            res.setHeader('Content-Disposition', `attachment; filename="${book.filename}"`);
-            res.sendFile(path.resolve(filePath));
+            res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(book.filename)}`);
+            res.sendFile(filePath);
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
@@ -109,9 +111,9 @@ export function booksRouter(db, booksDir) {
             }
 
             if (book.cover_path) {
-                const coverPath = path.join(booksDir, book.cover_path);
+                const coverPath = resolveInside(booksDir, book.cover_path);
                 if (fs.existsSync(coverPath)) {
-                    return res.sendFile(path.resolve(coverPath));
+                    return res.sendFile(coverPath);
                 }
             }
 
@@ -126,60 +128,74 @@ export function booksRouter(db, booksDir) {
      * PUT /api/books/series/rename
      * Rename a series — updates all books in the series and moves files on disk
      */
-    router.put('/series/rename', (req, res) => {
+    router.put('/series/rename', requireAdmin, (req, res) => {
         try {
-            const { oldName, newName } = req.body;
-            if (!oldName || !newName) {
+            const { oldName } = req.body;
+            if (!oldName || !req.body.newName) {
                 return res.status(400).json({ error: 'Both oldName and newName are required' });
             }
+            // The folder name is the series name (the scanner reads it back
+            // from disk), so store exactly what the folder will be called.
+            const newName = safeSegment(req.body.newName);
 
             const booksInSeries = db.prepare('SELECT * FROM books WHERE series = ?').all(oldName);
             if (booksInSeries.length === 0) {
                 return res.status(404).json({ error: `No books found in series "${oldName}"` });
             }
 
-            const oldDir = path.join(booksDir, oldName);
-            const newDir = path.join(booksDir, newName);
-            fs.mkdirSync(newDir, { recursive: true });
+            const newDir = resolveInside(booksDir, newName);
+            // Books in the root of the books folder are "Uncategorized" but
+            // have no folder of their own, so they're moved one by one.
+            const oldDir = path.dirname(resolveInside(booksDir, booksInSeries[0].filepath));
+            const isSeriesFolder = oldDir !== path.resolve(booksDir)
+                && booksInSeries.every((b) => path.dirname(resolveInside(booksDir, b.filepath)) === oldDir);
 
-            // Move each file and update DB
-            for (const book of booksInSeries) {
-                const oldFilePath = path.join(booksDir, book.filepath);
-                const newFilePath = path.join(newDir, book.filename);
+            const relocate = db.prepare(`
+                UPDATE books SET series = ?, filepath = ?, cover_path = ?, updated_at = datetime('now') WHERE id = ?
+            `);
+            const moveInDb = (book, fromDir) => {
+                const rebase = (rel) => {
+                    if (!rel) return rel;
+                    const abs = resolveInside(booksDir, rel);
+                    return path.dirname(abs) === fromDir
+                        ? path.relative(booksDir, path.join(newDir, path.basename(abs)))
+                        : rel;
+                };
+                relocate.run(newName, rebase(book.filepath), rebase(book.cover_path), book.id);
+            };
 
-                if (fs.existsSync(oldFilePath)) {
-                    fs.renameSync(oldFilePath, newFilePath);
-                }
-
-                // Move cover if it's in the old series directory
-                if (book.cover_path) {
-                    const oldCoverPath = path.join(booksDir, book.cover_path);
-                    const coverFilename = path.basename(book.cover_path);
-                    const newCoverPath = path.join(newDir, coverFilename);
-
-                    if (fs.existsSync(oldCoverPath)) {
-                        fs.renameSync(oldCoverPath, newCoverPath);
+            if (isSeriesFolder && fs.existsSync(oldDir) && !fs.existsSync(newDir)) {
+                // Rename the whole folder: keeps cover.jpg and anything else in
+                // it together, and is a single atomic move on the same disk.
+                fs.renameSync(oldDir, newDir);
+                db.transaction(() => booksInSeries.forEach((b) => moveInDb(b, oldDir)))();
+            } else {
+                // Merging into an existing series (or out of the root): move
+                // each book and its own cover.
+                fs.mkdirSync(newDir, { recursive: true });
+                for (const book of booksInSeries) {
+                    const from = resolveInside(booksDir, book.filepath);
+                    const fromDir = path.dirname(from);
+                    const to = path.join(newDir, path.basename(from));
+                    if (fs.existsSync(to) && to !== from) {
+                        throw new Error(`"${path.basename(from)}" already exists in "${newName}"`);
                     }
-
-                    const newCoverRelative = path.relative(booksDir, newCoverPath);
-                    db.prepare('UPDATE books SET cover_path = ? WHERE id = ?').run(newCoverRelative, book.id);
+                    if (fs.existsSync(from)) fs.renameSync(from, to);
+                    if (book.cover_path) {
+                        const cover = resolveInside(booksDir, book.cover_path);
+                        const coverTo = path.join(newDir, path.basename(cover));
+                        if (path.dirname(cover) === fromDir && fs.existsSync(cover) && !fs.existsSync(coverTo)) {
+                            fs.renameSync(cover, coverTo);
+                        }
+                    }
+                    moveInDb(book, fromDir);
                 }
-
-                const newRelativePath = path.relative(booksDir, newFilePath);
-                db.prepare(`
-                    UPDATE books SET series = ?, filepath = ?, updated_at = datetime('now') WHERE id = ?
-                `).run(newName, newRelativePath, book.id);
+                try {
+                    if (isSeriesFolder && fs.readdirSync(oldDir).length === 0) fs.rmdirSync(oldDir);
+                } catch { /* ignore */ }
             }
 
-            // Try to remove old directory if empty
-            try {
-                const remaining = fs.readdirSync(oldDir);
-                if (remaining.length === 0) {
-                    fs.rmdirSync(oldDir);
-                }
-            } catch { /* ignore */ }
-
-            res.json({ success: true, updated: booksInSeries.length });
+            res.json({ success: true, updated: booksInSeries.length, series: newName });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
@@ -201,7 +217,8 @@ export function booksRouter(db, booksDir) {
 
             const title = req.body.title || path.basename(epubFile.originalname, '.epub');
             const author = req.body.author || 'Unknown Author';
-            const series = req.body.series || 'Uncategorized';
+            // Same name as the folder multer wrote into, so a rescan agrees with it.
+            const series = safeSegment(req.body.series);
             const id = uuidv4();
 
             const relativePath = path.relative(booksDir, epubFile.path);
@@ -227,7 +244,7 @@ export function booksRouter(db, booksDir) {
             db.prepare(`
                 INSERT INTO books (id, title, author, series, filename, filepath, cover_path, file_size, file_hash)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(id, title, author, series, epubFile.originalname, relativePath, coverPath, epubFile.size, fileHash);
+            `).run(id, title, author, series, epubFile.filename, relativePath, coverPath, epubFile.size, fileHash);
 
             const book = db.prepare('SELECT * FROM books WHERE id = ?').get(id);
             res.status(201).json(book);
@@ -240,14 +257,15 @@ export function booksRouter(db, booksDir) {
      * PUT /api/books/:id
      * Update book metadata
      */
-    router.put('/:id', (req, res) => {
+    router.put('/:id', requireAdmin, (req, res) => {
         try {
             const book = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
             if (!book) {
                 return res.status(404).json({ error: 'Book not found' });
             }
 
-            const { title, author, series } = req.body;
+            const { title, author } = req.body;
+            const series = req.body.series ? safeSegment(req.body.series) : null;
             db.prepare(`
                 UPDATE books SET 
                     title = COALESCE(?, title),
@@ -259,9 +277,9 @@ export function booksRouter(db, booksDir) {
 
             // If series changed, move the file
             if (series && series !== book.series) {
-                const oldPath = path.join(booksDir, book.filepath);
-                const newDir = path.join(booksDir, series);
-                const newPath = path.join(newDir, book.filename);
+                const oldPath = resolveInside(booksDir, book.filepath);
+                const newDir = resolveInside(booksDir, series);
+                const newPath = path.join(newDir, path.basename(oldPath));
                 fs.mkdirSync(newDir, { recursive: true });
 
                 if (fs.existsSync(oldPath)) {
@@ -294,11 +312,16 @@ export function booksRouter(db, booksDir) {
             }
 
             // Determine the target cover path: <series>/<title>.<ext>
-            const series = book.series || 'Uncategorized';
-            const ext = path.extname(req.file.originalname) || '.jpg';
-            const coverFilename = path.basename(book.filename, '.epub') + ext;
-            const coverDir = path.join(booksDir, series);
-            const coverFullPath = path.join(coverDir, coverFilename);
+            // Next to the epub, named after it, so the scanner picks it up as
+            // that book's own cover.
+            const ext = (path.extname(req.file.originalname) || '.jpg').toLowerCase();
+            if (!['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
+                try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+                return res.status(400).json({ error: 'Cover must be .jpg, .png or .webp' });
+            }
+            const epubPath = resolveInside(booksDir, book.filepath);
+            const coverDir = path.dirname(epubPath);
+            const coverFullPath = path.join(coverDir, path.basename(epubPath, path.extname(epubPath)) + ext);
 
             fs.mkdirSync(coverDir, { recursive: true });
 
@@ -324,7 +347,7 @@ export function booksRouter(db, booksDir) {
      * DELETE /api/books/:id
      * Delete a book (removes from DB, optionally from disk)
      */
-    router.delete('/:id', (req, res) => {
+    router.delete('/:id', requireAdmin, (req, res) => {
         try {
             const book = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
             if (!book) {
@@ -337,7 +360,7 @@ export function booksRouter(db, booksDir) {
 
             // Optionally remove file from disk
             if (req.query.deleteFile === 'true') {
-                const filePath = path.join(booksDir, book.filepath);
+                const filePath = resolveInside(booksDir, book.filepath);
                 if (fs.existsSync(filePath)) {
                     fs.unlinkSync(filePath);
                 }

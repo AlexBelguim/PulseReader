@@ -16,9 +16,9 @@ export function syncRouter(db, booksDir) {
                        b.file_hash, b.file_size, b.cover_path, b.added_at, b.updated_at,
                        rp.location as last_read, rp.progress, rp.is_read, rp.updated_at as progress_updated_at
                 FROM books b
-                LEFT JOIN reading_progress rp ON b.id = rp.book_id
+                LEFT JOIN reading_progress rp ON b.id = rp.book_id AND rp.user_id = ?
                 ORDER BY b.series, b.title
-            `).all();
+            `).all(req.user.id);
 
             res.json({
                 books,
@@ -59,9 +59,9 @@ export function syncRouter(db, booksDir) {
 
             // Default (auto) merge: highest-progress-wins, is_read is sticky.
             const mergeUpsert = db.prepare(`
-                INSERT INTO reading_progress (book_id, location, progress, is_read, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(book_id) DO UPDATE SET
+                INSERT INTO reading_progress (user_id, book_id, location, progress, is_read, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, book_id) DO UPDATE SET
                     location = CASE
                         WHEN excluded.progress > reading_progress.progress THEN excluded.location
                         ELSE reading_progress.location
@@ -83,9 +83,9 @@ export function syncRouter(db, booksDir) {
             // Explicit push: the client is the source of truth, so overwrite
             // unconditionally. Lets the user lower progress or clear read-state.
             const forceUpsert = db.prepare(`
-                INSERT INTO reading_progress (book_id, location, progress, is_read, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(book_id) DO UPDATE SET
+                INSERT INTO reading_progress (user_id, book_id, location, progress, is_read, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, book_id) DO UPDATE SET
                     location = excluded.location,
                     progress = excluded.progress,
                     is_read = excluded.is_read,
@@ -94,9 +94,14 @@ export function syncRouter(db, booksDir) {
 
             const upsert = force ? forceUpsert : mergeUpsert;
 
+            // Books the server doesn't know (deleted since the client last
+            // synced) are skipped rather than failing the whole batch.
+            const bookExists = db.prepare('SELECT 1 FROM books WHERE id = ?');
             const transaction = db.transaction((updates) => {
                 for (const update of updates) {
+                    if (!bookExists.get(update.book_id)) continue;
                     upsert.run(
+                        req.user.id,
                         update.book_id,
                         update.location,
                         update.progress,
@@ -110,8 +115,8 @@ export function syncRouter(db, booksDir) {
 
             // Return current state
             const currentProgress = db.prepare(`
-                SELECT * FROM reading_progress ORDER BY updated_at DESC
-            `).all();
+                SELECT * FROM reading_progress WHERE user_id = ? ORDER BY updated_at DESC
+            `).all(req.user.id);
 
             res.json({ success: true, progress: currentProgress });
         } catch (err) {

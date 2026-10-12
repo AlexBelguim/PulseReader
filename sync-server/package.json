@@ -1,12 +1,13 @@
 {
   "name": "pulsereader-sync-server",
   "version": "1.0.0",
-  "description": "Self-hosted sync server for PulseReader - runs on TrueNAS or any Docker host",
+  "description": "PulseReader server: serves the web app and syncs books and reading progress",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "start": "node --env-file-if-exists=../.env src/index.js",
+    "dev": "node --env-file-if-exists=../.env --watch src/index.js",
+    "test": "node tools/test_paths.mjs && node tools/test_users.mjs && node tools/test_scanner_floor.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",
@@ -14,5 +15,8 @@
     "express": "^5.1.0",
     "multer": "^1.4.5-lts.2",
     "uuid": "^11.1.0"
+  },
+  "engines": {
+    "node": ">=22.9"
   }
 }

@@ -162,6 +162,23 @@ export const toggleBookRead = async (id) => {
     return newState;
 };
 
+/**
+ * Forget every reading position on this device: used when a different
+ * account signs in, so one person's progress never gets pushed into
+ * another's. Writes explicit "unread, at the start" rows (rather than
+ * clearing the store) so pre-v4 positions on the book records can't come
+ * back through the getProgress fallback.
+ */
+export const resetAllProgress = async () => {
+    const db = await initDB();
+    const ids = await db.getAllKeys('books');
+    const tx = db.transaction('progress', 'readwrite');
+    await Promise.all([
+        ...ids.map((bookId) => tx.store.put({ bookId, cfi: null, percentage: 0, isRead: false, updatedAt: null })),
+        tx.done,
+    ]);
+};
+
 // ---- Cached epub.js locations (content-based, layout-independent) ----
 
 export const getLocationsCache = async (bookId) => {

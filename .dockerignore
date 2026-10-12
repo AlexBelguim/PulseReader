@@ -1,0 +1,14 @@
+node_modules
+**/node_modules
+dist
+data
+books
+sync-server/data
+.git
+.github
+.claude
+.env
+.env.*
+*.log
+**/.DS_Store
+**/Thumbs.db

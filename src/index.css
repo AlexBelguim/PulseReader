@@ -2113,3 +2113,76 @@ input[type="file"] {
   overflow-x: auto;
   border: 1px solid var(--color-border);
 }
+/* Library: a server write that failed (rename, read-state, author) */
+.library-toast {
+  position: fixed;
+  /* centred without transform: framer-motion owns transform for the slide-in */
+  left: 16px;
+  right: 16px;
+  margin: 0 auto;
+  max-width: 480px;
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  z-index: 1100;
+  cursor: pointer;
+}
+
+/* Sync panel: account management (admin) */
+.user-list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.user-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.user-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-you {
+  opacity: 0.6;
+}
+
+.user-role,
+.user-reset input {
+  background: var(--color-bg);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.5rem 0.625rem;
+  font-size: 0.875rem;
+}
+
+.user-reset {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.user-reset input {
+  flex: 1;
+  min-width: 0;
+}
+
+.user-admin-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+  cursor: pointer;
+}
+
+.sync-password-form {
+  margin-top: 12px;
+}

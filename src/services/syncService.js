@@ -1,58 +1,29 @@
 /**
  * PulseReader Sync Service
- * Handles communication with the self-hosted sync server.
+ * Talks to the PulseReader server that serves this web app. There is nothing
+ * to configure: the server is always this page's own origin, and signing in
+ * sets an HttpOnly session cookie that every request carries.
  */
 
-const SYNC_CONFIG_KEY = 'pulsereader-sync-config';
+// Relative to the page, so the app also works behind a reverse proxy that
+// mounts it under a sub-path (https://example.com/reader/).
+const serverUrl = (endpoint) => new URL(endpoint.replace(/^\//, ''), document.baseURI).href;
 
 /**
- * Get sync configuration from localStorage
- */
-export function getSyncConfig() {
-    try {
-        const config = localStorage.getItem(SYNC_CONFIG_KEY);
-        if (config) {
-            return JSON.parse(config);
-        }
-    } catch (err) {
-        console.error('Failed to read sync config:', err);
-    }
-    return { serverUrl: '', apiKey: '', enabled: false, autoSync: false };
-}
-
-/**
- * Save sync configuration to localStorage
- */
-export function saveSyncConfig(config) {
-    localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
-}
-
-/**
- * Make an authenticated request to the sync server
+ * Make an authenticated request to the server
  */
 async function syncFetch(endpoint, options = {}) {
-    const config = getSyncConfig();
-    if (!config.serverUrl) {
-        throw new Error('Sync server not configured');
-    }
-
-    const url = `${config.serverUrl.replace(/\/$/, '')}${endpoint}`;
-    const headers = {
-        ...options.headers,
-    };
-
-    if (config.apiKey) {
-        headers['X-API-Key'] = config.apiKey;
-    }
+    const headers = { ...options.headers };
 
     // Don't set Content-Type for FormData (browser sets it with boundary)
     if (!(options.body instanceof FormData)) {
         headers['Content-Type'] = 'application/json';
     }
 
-    const response = await fetch(url, {
+    const response = await fetch(serverUrl(endpoint), {
         ...options,
         headers,
+        credentials: 'same-origin',
     });
 
     if (!response.ok) {
@@ -63,32 +34,110 @@ async function syncFetch(endpoint, options = {}) {
     return response;
 }
 
+let lastStatus = { available: false, authenticated: false };
+
 /**
- * Test connection to the sync server
+ * Is this page being served by a PulseReader server, and are we signed in?
+ * Resolves { available, authenticated, version }. "available: false" means a
+ * static copy (vite preview, offline from the PWA cache): the library still
+ * works locally, there is just nothing to sync with.
  */
-export async function testConnection(serverUrl, apiKey) {
+export async function getServerStatus() {
     try {
-        const url = `${serverUrl.replace(/\/$/, '')}/health`;
-        const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
-        if (!response.ok) throw new Error('Server not reachable');
-
-        const health = await response.json();
-        if (health.status !== 'ok') throw new Error('Server unhealthy');
-
-        // Test auth if API key provided
-        if (apiKey) {
-            const authResponse = await fetch(`${serverUrl.replace(/\/$/, '')}/api/sync/status`, {
-                headers: { 'X-API-Key': apiKey },
-                signal: AbortSignal.timeout(5000),
-            });
-            if (!authResponse.ok) throw new Error('Authentication failed');
+        const health = await fetch(serverUrl('/health'), { signal: AbortSignal.timeout(5000) })
+            .then((r) => (r.ok ? r.json() : null));
+        if (health?.app !== 'pulsereader') {
+            lastStatus = { available: false, authenticated: false };
+            return lastStatus;
         }
-
-        return { success: true, version: health.version };
-    } catch (err) {
-        return { success: false, error: err.message };
+        const me = await fetch(serverUrl('/api/auth/me'), { credentials: 'same-origin' }).then((r) => r.json());
+        lastStatus = {
+            available: true,
+            authenticated: !!me.authenticated,
+            user: me.user || null,
+            version: health.version,
+        };
+    } catch {
+        // Offline or the server is restarting. Nothing is cleared: the session
+        // cookie is untouched and the next check simply finds it again.
+        lastStatus = { available: false, authenticated: false };
     }
+    return lastStatus;
 }
+
+/**
+ * The last known server status, without a round trip. Library uses it to
+ * decide whether an edit should also be written to the server.
+ */
+export function isServerConnected() {
+    return lastStatus.available && lastStatus.authenticated;
+}
+
+export function isAdmin() {
+    return isServerConnected() && lastStatus.user?.role === 'admin';
+}
+
+// The account this device last synced as. Reading progress in IndexedDB is
+// per device, so when someone else signs in here it has to be swapped out
+// rather than merged into their account.
+const LAST_USER_KEY = 'pulsereader-last-user';
+
+export function getLastUser() {
+    try { return localStorage.getItem(LAST_USER_KEY); } catch { return null; }
+}
+
+function setLastUser(username) {
+    try { localStorage.setItem(LAST_USER_KEY, username); } catch { /* private mode */ }
+}
+
+export async function login(username, password) {
+    const { user } = await syncFetch('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ username, password }),
+    }).then((r) => r.json());
+
+    // Offer the login to the browser's password manager. Browsers that watch
+    // form submits already prompt; this covers the ones (Chrome on Android,
+    // installed PWAs) that miss a fetch-based sign-in.
+    try {
+        if (window.PasswordCredential && navigator.credentials?.store) {
+            await navigator.credentials.store(new window.PasswordCredential({ id: username, password, name: username }));
+        }
+    } catch { /* not supported or the user declined */ }
+
+    const status = await getServerStatus();
+    return { status, previousUser: getLastUser(), user };
+}
+
+/** Call once the device's local progress belongs to `username`. */
+export function claimDevice(username) {
+    setLastUser(username);
+}
+
+export async function logout() {
+    await syncFetch('/api/auth/logout', { method: 'POST' });
+    return getServerStatus();
+}
+
+export async function changePassword(currentPassword, newPassword) {
+    await syncFetch('/api/auth/password', {
+        method: 'PUT',
+        body: JSON.stringify({ currentPassword, newPassword }),
+    });
+}
+
+// ---- Admin: accounts ----
+
+export const listUsers = () => syncFetch('/api/users').then((r) => r.json());
+
+export const createUser = (username, password, role = 'user') =>
+    syncFetch('/api/users', { method: 'POST', body: JSON.stringify({ username, password, role }) }).then((r) => r.json());
+
+export const updateUser = (id, changes) =>
+    syncFetch(`/api/users/${id}`, { method: 'PUT', body: JSON.stringify(changes) }).then((r) => r.json());
+
+export const deleteUser = (id) =>
+    syncFetch(`/api/users/${id}`, { method: 'DELETE' }).then((r) => r.json());
 
 /**
  * Get sync status from server (all books + progress)
@@ -176,6 +225,21 @@ export async function syncProgress(progressUpdates, force = false) {
 }
 
 /**
+ * Write one book's read-state and position straight to the server, so marking
+ * a book read on one device doesn't wait for someone to remember to push.
+ */
+export async function pushBookState(book) {
+    if (!book?.syncId || !isServerConnected()) return;
+    await syncProgress([{
+        book_id: book.syncId,
+        location: book.lastRead || null,
+        progress: book.progress || 0,
+        is_read: !!book.isRead,
+        updated_at: new Date().toISOString(),
+    }], true);
+}
+
+/**
  * Match local books to server books by syncId, then title, then file size.
  * Returns [{ localBook, serverBook }] with each server book matched once.
  */
@@ -222,9 +286,8 @@ function matchLocalToServer(localBooks, serverBooks) {
  * local state as truth (force overwrite).
  */
 export async function pushProgress(localBooks, updateBookFn) {
-    const config = getSyncConfig();
-    if (!config.serverUrl) {
-        return { synced: false, reason: 'Sync server URL not configured' };
+    if (!isServerConnected()) {
+        return { synced: false, reason: 'Not signed in to the PulseReader server' };
     }
 
     const result = { pushed: 0, errors: [] };
@@ -278,9 +341,8 @@ export async function pushProgress(localBooks, updateBookFn) {
  * (so read-state can also be cleared from another device).
  */
 export async function pullProgress(localBooks, updateProgressFn, updateBookFn) {
-    const config = getSyncConfig();
-    if (!config.serverUrl) {
-        return { synced: false, reason: 'Sync server URL not configured' };
+    if (!isServerConnected()) {
+        return { synced: false, reason: 'Not signed in to the PulseReader server' };
     }
 
     const result = { pulled: 0, errors: [] };
@@ -360,9 +422,8 @@ export async function updateServerBook(bookId, updates) {
  * 8. Sync reading progress
  */
 export async function performFullSync(localBooks, addBookFn, updateProgressFn, updateBookFn, deleteBookFn) {
-    const config = getSyncConfig();
-    if (!config.serverUrl) {
-        return { synced: false, reason: 'Sync server URL not configured' };
+    if (!isServerConnected()) {
+        return { synced: false, reason: 'Not signed in to the PulseReader server' };
     }
 
     const results = {

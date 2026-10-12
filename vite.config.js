@@ -5,6 +5,14 @@ import { VitePWA } from 'vite-plugin-pwa'
 // https://vite.dev/config/
 export default defineConfig({
   base: './',
+  // `npm run dev` + `npm run server`: the app talks to its own origin, so
+  // forward the server's routes to it, same as when the server hosts the build.
+  server: {
+    proxy: {
+      '/api': 'http://localhost:3000',
+      '/health': 'http://localhost:3000',
+    },
+  },
   plugins: [
     react(),
     VitePWA({
