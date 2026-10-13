@@ -111,6 +111,10 @@ export function bootstrapAdmin(db, env) {
     if (count === 0) {
         const password = env.ADMIN_PASSWORD || env.API_KEY;
         if (!password) return false;
+        // The app is meant to be reachable from outside; don't create the
+        // most powerful account with a guessable password.
+        const problem = validatePassword(password);
+        if (problem) throw new Error(`ADMIN_PASSWORD: ${problem}`);
         const { username, error } = validateUsername(env.ADMIN_USERNAME || 'admin');
         if (error) throw new Error(`ADMIN_USERNAME: ${error}`);
         db.prepare("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')")

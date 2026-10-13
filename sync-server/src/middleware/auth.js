@@ -86,6 +86,13 @@ export function authRouter(db, apiKey) {
     });
 
     router.post('/login', (req, res) => {
+        // Bounded, so a flood of logins from many addresses can't grow it
+        // without limit: drop entries that are neither counting nor locked.
+        if (failures.size > 10000) {
+            for (const [key, value] of failures) {
+                if (value.until < Date.now()) failures.delete(key);
+            }
+        }
         const ip = req.ip || 'unknown';
         const entry = failures.get(ip);
         if (entry && entry.until > Date.now()) {

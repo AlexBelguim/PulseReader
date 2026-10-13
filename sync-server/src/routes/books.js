@@ -7,6 +7,26 @@ import { computeFileHash } from '../scanner.js';
 import { safeSegment, resolveInside } from '../paths.js';
 import { requireAdmin } from '../middleware/auth.js';
 
+// Covers are served from this origin, so only real image types are accepted
+// and each is served as exactly that type. An uploaded "cover.html" or
+// "cover.svg" used to be stored and served as HTML/SVG, which runs script in
+// the app's origin: a reader account could plant one and use an admin's
+// session when the admin opened it. (Same list as the scanner's covers.)
+const COVER_TYPES = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+};
+
+// Files from the library are data, never pages: no MIME sniffing, and if one
+// is ever opened directly it renders in a sandbox with nothing allowed.
+const serveAsData = (res, contentType) => {
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; sandbox");
+};
+
 export function booksRouter(db, booksDir) {
     const router = Router();
 
@@ -25,8 +45,17 @@ export function booksRouter(db, booksDir) {
         }),
         limits: { fileSize: 200 * 1024 * 1024 }, // 200MB max
         fileFilter: (req, file, cb) => {
-            if (file.fieldname === 'epub' && !file.originalname.toLowerCase().endsWith('.epub')) {
+            const ext = path.extname(file.originalname).toLowerCase();
+            if (file.fieldname === 'epub' && ext !== '.epub') {
                 cb(new Error('Only .epub files are allowed'));
+                return;
+            }
+            if (file.fieldname === 'cover' && !COVER_TYPES[ext]) {
+                cb(new Error('Cover must be .jpg, .png or .webp'));
+                return;
+            }
+            if (file.fieldname !== 'epub' && file.fieldname !== 'cover') {
+                cb(new Error(`Unexpected file field "${file.fieldname}"`));
                 return;
             }
             cb(null, true);
@@ -90,7 +119,7 @@ export function booksRouter(db, booksDir) {
                 return res.status(404).json({ error: 'File not found on disk' });
             }
 
-            res.setHeader('Content-Type', 'application/epub+zip');
+            serveAsData(res, 'application/epub+zip');
             res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(book.filename)}`);
             res.sendFile(filePath);
         } catch (err) {
@@ -110,9 +139,11 @@ export function booksRouter(db, booksDir) {
                 return res.status(404).json({ error: 'Book not found' });
             }
 
-            if (book.cover_path) {
+            const type = book.cover_path && COVER_TYPES[path.extname(book.cover_path).toLowerCase()];
+            if (type) {
                 const coverPath = resolveInside(booksDir, book.cover_path);
                 if (fs.existsSync(coverPath)) {
+                    serveAsData(res, type);
                     return res.sendFile(coverPath);
                 }
             }
@@ -315,7 +346,7 @@ export function booksRouter(db, booksDir) {
             // Next to the epub, named after it, so the scanner picks it up as
             // that book's own cover.
             const ext = (path.extname(req.file.originalname) || '.jpg').toLowerCase();
-            if (!['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
+            if (!COVER_TYPES[ext]) {
                 try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
                 return res.status(400).json({ error: 'Cover must be .jpg, .png or .webp' });
             }

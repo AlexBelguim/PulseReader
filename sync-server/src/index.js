@@ -34,9 +34,14 @@ const db = initDB(path.join(dataDir, 'db', 'pulsereader.db'));
 // Every book and reading position is behind a sign-in. The first admin comes
 // from ADMIN_USERNAME / ADMIN_PASSWORD (or API_KEY, for setups from before
 // there were accounts); after that, accounts live in the database.
-if (!bootstrapAdmin(db, process.env)) {
-    console.error('No users yet. Set ADMIN_PASSWORD (and optionally ADMIN_USERNAME, default "admin")');
-    console.error('to create the first admin account, then restart.');
+try {
+    if (!bootstrapAdmin(db, process.env)) {
+        console.error('No users yet. Set ADMIN_PASSWORD (and optionally ADMIN_USERNAME, default "admin")');
+        console.error('to create the first admin account, then restart.');
+        process.exit(1);
+    }
+} catch (err) {
+    console.error(`Could not create the first admin: ${err.message}`);
     process.exit(1);
 }
 
@@ -56,6 +61,17 @@ if (process.env.CORS_ORIGIN) {
 }
 app.use(express.json({ limit: '5mb' }));
 
+// Baseline headers on everything: no MIME sniffing, no framing (clickjacking
+// the admin panel), and no full URLs leaking to other sites.
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+    res.setHeader('Referrer-Policy', 'same-origin');
+    next();
+});
+
 // Health check (unauthenticated; the web app uses it to find its server)
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', app: 'pulsereader', version: VERSION });
@@ -69,6 +85,15 @@ app.use('/api/books', booksRouter(db, BOOKS_DIR));
 app.use('/api/progress', progressRouter(db));
 app.use('/api/sync', syncRouter(db, BOOKS_DIR));
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
+
+// Errors thrown before a route's own try/catch (a rejected upload, a body
+// too large, malformed JSON) as JSON, without stack traces or file paths.
+// eslint-disable-next-line no-unused-vars
+app.use('/api', (err, req, res, next) => {
+    const status = err.status || err.statusCode || (err.name === 'MulterError' || /allowed|must be|Unexpected file/.test(err.message) ? 400 : 500);
+    if (status >= 500) console.error('API error:', err);
+    res.status(status).json({ error: status >= 500 ? 'Internal server error' : err.message });
+});
 
 // The web app. Hashed assets never change under the same name, so cache them
 // for a year; index.html, the service worker and the manifest must always be
