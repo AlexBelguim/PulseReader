@@ -21,6 +21,7 @@ import {
     deleteBook,
     updateBook,
     toggleBookRead,
+    requestPersistentStorage,
 } from '../services/db';
 import {
     getServerStatus,
@@ -73,6 +74,9 @@ const Library = () => {
             try {
                 const storedBooks = await getBooks();
                 setBooks(storedBooks.reverse());
+                // Libraries downloaded before the app asked for persistent
+                // storage get protected too.
+                if (storedBooks.length) requestPersistentStorage();
                 // Extract covers for books that are missing them
                 extractMissingCovers(storedBooks);
             } catch (err) {

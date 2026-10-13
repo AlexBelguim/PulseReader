@@ -58,7 +58,27 @@ const queueProgressWrite = (fn) => {
 /** Resolves once every progress write queued so far has landed. */
 export const whenProgressSaved = () => progressQueue;
 
+/**
+ * Ask the browser to keep this app's storage. Without it, storage is
+ * "best effort": the browser may clear it when the device runs low on space
+ * (and Safari clears sites unused for 7 days unless installed), which takes
+ * the downloaded books with it. Chrome grants this quietly for installed or
+ * often-used apps; Firefox asks once. Asked once per page load, and only
+ * once there are books worth keeping.
+ */
+let persistRequested = false;
+export const requestPersistentStorage = async () => {
+    if (persistRequested) return;
+    persistRequested = true;
+    try {
+        if (navigator.storage?.persist && !(await navigator.storage.persisted())) {
+            await navigator.storage.persist();
+        }
+    } catch { /* not supported */ }
+};
+
 export const addBook = async (bookData) => {
+    requestPersistentStorage();
     const db = await initDB();
     const { progress, lastRead, isRead, progressAt, readAt, ...rest } = bookData;
     const id = await db.add('books', {

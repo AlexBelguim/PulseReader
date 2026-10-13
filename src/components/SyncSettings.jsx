@@ -235,6 +235,21 @@ const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onC
                     <div className="sync-section">
                         <h3>Account</h3>
 
+                        {/* Browsers only allow a service worker (the offline
+                            copy of the app) and "install app" on HTTPS or
+                            localhost. Say so, rather than letting the app
+                            quietly fail to open on the next flight. */}
+                        {!window.isSecureContext && (
+                            <div className="sync-result error">
+                                <AlertCircle size={16} />
+                                <span>
+                                    This page uses plain HTTP, so the app can't open without a connection and
+                                    can't be installed. Your downloaded books are kept either way. Serve it over
+                                    HTTPS (Tailscale or a Cloudflare Tunnel, see the README) for offline reading.
+                                </span>
+                            </div>
+                        )}
+
                         {connected ? (
                             <>
                                 <div className="sync-actions-row">
