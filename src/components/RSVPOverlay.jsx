@@ -97,6 +97,8 @@ const RSVPOverlay = ({
     startWord,
     wpm: initialWpm = 300,
     onWpmChange,
+    tone = 'bright',
+    onToneChange,
     onProgress,
     onCloseWithPosition,
 }) => {
@@ -1089,6 +1091,7 @@ const RSVPOverlay = ({
             <motion.div
                 key="rsvp-overlay"
                 className="rsvp-overlay"
+                data-tone={tone}
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
@@ -1216,6 +1219,26 @@ const RSVPOverlay = ({
                                 animate={{ opacity: 1, y: 0 }}
                                 exit={{ opacity: 0, y: 10 }}
                             >
+                                {/* Bright white and red on an OLED black can be harsh
+                                    over a long session; softer levels dim both the
+                                    word and the red focus letter. */}
+                                <div className="rsvp-settings-title">Word colour</div>
+                                <div className="rsvp-tone-options" role="radiogroup" aria-label="Word colour">
+                                    {[['bright', 'Bright'], ['soft', 'Soft'], ['dim', 'Dim']].map(([value, label]) => (
+                                        <button
+                                            key={value}
+                                            role="radio"
+                                            aria-checked={tone === value}
+                                            className={`rsvp-tone-option ${tone === value ? 'active' : ''}`}
+                                            data-tone={value}
+                                            onClick={() => onToneChange?.(value)}
+                                        >
+                                            <span className="rsvp-tone-sample">a<b>b</b>c</span>
+                                            {label}
+                                        </button>
+                                    ))}
+                                </div>
+
                                 <div className="rsvp-settings-title">Delay Multipliers</div>
 
                                 <div className="rsvp-setting-item">

@@ -17,6 +17,7 @@ const defaultSettings = {
 
     // RSVP Settings
     rsvpSpeed: 300, // WPM 100-1000
+    rsvpTone: 'bright', // 'bright' | 'soft' | 'dim' -- word + red letter brightness
     trainingMode: false,
 };
 

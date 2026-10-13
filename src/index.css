@@ -415,12 +415,37 @@ input[type="file"] {
 }
 
 /* Prominent center indicators */
+/* Word colour levels (RSVP settings). Each sets the word, the red focus
+   letter and how much that red glows; the glow adds to the glare on OLED. */
+.rsvp-overlay,
+.rsvp-tone-option[data-tone='bright'] {
+  --rsvp-word: var(--color-text);
+  --rsvp-focus: 255 75 75;
+  --rsvp-glow: 1;
+}
+
+.rsvp-overlay[data-tone='soft'],
+.rsvp-tone-option[data-tone='soft'] {
+  --rsvp-word: #a6a6a6;
+  --rsvp-focus: 205 60 60;
+  --rsvp-glow: 0.5;
+}
+
+.rsvp-overlay[data-tone='dim'],
+.rsvp-tone-option[data-tone='dim'] {
+  --rsvp-word: #737373;
+  --rsvp-focus: 160 45 45;
+  --rsvp-glow: 0.2;
+}
+
 .rsvp-center-indicator {
   width: 3px;
   height: 40px;
-  background: var(--color-primary);
+  background: rgb(var(--rsvp-focus));
   opacity: 0.8;
-  box-shadow: 0 0 10px rgba(255, 75, 75, 0.6), 0 0 20px rgba(255, 75, 75, 0.3);
+  box-shadow:
+    0 0 10px rgb(var(--rsvp-focus) / calc(0.6 * var(--rsvp-glow))),
+    0 0 20px rgb(var(--rsvp-focus) / calc(0.3 * var(--rsvp-glow)));
 }
 
 .rsvp-center-indicator-top {
@@ -448,7 +473,7 @@ input[type="file"] {
 
 /* Before text - right aligned to center */
 .word-before {
-  color: var(--color-text);
+  color: var(--rsvp-word);
   text-align: right;
   white-space: pre;
   overflow: hidden;
@@ -456,7 +481,7 @@ input[type="file"] {
 
 /* After text - left aligned from center */
 .word-after {
-  color: var(--color-text);
+  color: var(--rsvp-word);
   text-align: left;
   white-space: pre;
   overflow: hidden;
@@ -464,10 +489,10 @@ input[type="file"] {
 
 /* Highlighted letter - always in the CENTER column */
 .word-highlight {
-  color: var(--color-primary);
+  color: rgb(var(--rsvp-focus));
   text-shadow:
-    0 0 20px rgba(255, 75, 75, 0.4),
-    0 0 40px rgba(255, 75, 75, 0.2);
+    0 0 20px rgb(var(--rsvp-focus) / calc(0.4 * var(--rsvp-glow))),
+    0 0 40px rgb(var(--rsvp-focus) / calc(0.2 * var(--rsvp-glow)));
   font-weight: 700;
   position: relative;
   text-align: center;
@@ -478,7 +503,7 @@ input[type="file"] {
   content: '';
   position: absolute;
   inset: -4px -2px;
-  background: rgba(255, 75, 75, 0.1);
+  background: rgb(var(--rsvp-focus) / calc(0.1 * var(--rsvp-glow)));
   border-radius: 4px;
   z-index: -1;
 }
@@ -2235,4 +2260,73 @@ input[type="file"] {
 
 .reader-flash-layer.fading .reader-flash-box {
   opacity: 0;
+}
+
+/* Sync panel: Full Sync progress */
+.sync-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.sync-progress-text,
+.sync-progress-detail {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+}
+
+.sync-progress-title {
+  color: var(--color-text);
+}
+
+.sync-progress-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--color-border);
+  overflow: hidden;
+}
+
+.sync-progress-fill {
+  height: 100%;
+  background: var(--color-primary);
+  transition: width 0.2s ease;
+}
+
+/* RSVP settings: word colour choice */
+.rsvp-tone-options {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.rsvp-tone-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.5rem;
+  background: #000;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.rsvp-tone-option.active {
+  border-color: rgb(var(--rsvp-focus));
+  color: var(--color-text);
+}
+
+.rsvp-tone-sample {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--rsvp-word);
+}
+
+.rsvp-tone-sample b {
+  color: rgb(var(--rsvp-focus));
 }

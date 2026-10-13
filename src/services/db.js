@@ -1,7 +1,7 @@
 import { openDB } from 'idb';
 
 const DB_NAME = 'pulse-reader-db';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 
 // One connection for the page's lifetime. Opening a fresh one per call made
 // every page-turn save pay for two IndexedDB opens.
@@ -16,7 +16,7 @@ export const initDB = () => {
             opening.then((db) => db.close());
             dbPromise = null;
         },
-        upgrade(db, oldVersion, newVersion, transaction) {
+        async upgrade(db, oldVersion, newVersion, transaction) {
             const store = db.objectStoreNames.contains('books')
                 ? transaction.objectStore('books')
                 : db.createObjectStore('books', { keyPath: 'id', autoIncrement: true });
@@ -33,6 +33,25 @@ export const initDB = () => {
             }
             if (!db.objectStoreNames.contains('locations')) {
                 db.createObjectStore('locations', { keyPath: 'bookId' });
+            }
+
+            // v5: the epub files get their own store. With the file on the
+            // book record, showing the library read every book in full --
+            // a few hundred MB for a big shelf -- just to draw titles and
+            // covers. Existing files move over inside this upgrade
+            // transaction, so it is all-or-nothing: a failed upgrade leaves
+            // v4 untouched.
+            if (!db.objectStoreNames.contains('files')) {
+                const files = db.createObjectStore('files', { keyPath: 'bookId' });
+                let cursor = await store.openCursor();
+                while (cursor) {
+                    const { data, ...book } = cursor.value;
+                    if (data) {
+                        files.put({ bookId: book.id, data });
+                        cursor.update({ ...book, fileSize: data.byteLength ?? data.size ?? 0 });
+                    }
+                    cursor = await cursor.continue();
+                }
             }
         },
     });
@@ -80,11 +99,16 @@ export const requestPersistentStorage = async () => {
 export const addBook = async (bookData) => {
     requestPersistentStorage();
     const db = await initDB();
-    const { progress, lastRead, isRead, progressAt, readAt, ...rest } = bookData;
-    const id = await db.add('books', {
+    const { progress, lastRead, isRead, progressAt, readAt, data, ...rest } = bookData;
+    // The record and its file land together or not at all.
+    const tx = db.transaction(['books', 'files'], 'readwrite');
+    const id = await tx.objectStore('books').add({
         ...rest,
+        fileSize: data?.byteLength ?? data?.size ?? 0,
         addedAt: new Date(),
     });
+    if (data) await tx.objectStore('files').put({ bookId: id, data });
+    await tx.done;
     // Seed the progress store if the incoming book carried any reading state
     // (e.g. downloaded from the sync server).
     if (progress || lastRead || isRead) {
@@ -127,9 +151,17 @@ export const getBooks = async () => {
     });
 };
 
+/** One book with its epub file (for the reader). getBooks() leaves files out. */
 export const getBook = async (id) => {
     const db = await initDB();
-    return db.get('books', id);
+    const [book, file] = await Promise.all([db.get('books', id), db.get('files', id)]);
+    return book && { ...book, data: file?.data ?? book.data };
+};
+
+/** Just a book's epub file, or undefined. */
+export const getBookData = async (id) => {
+    const db = await initDB();
+    return (await db.get('files', id))?.data;
 };
 
 export const updateBook = async (id, updates) => {
@@ -277,6 +309,7 @@ export const deleteBook = async (id) => {
     const db = await initDB();
     await db.delete('books', id);
     // Best-effort cleanup of the auxiliary stores.
+    try { await db.delete('files', id); } catch { /* ignore */ }
     try { await db.delete('progress', id); } catch { /* ignore */ }
     try { await db.delete('locations', id); } catch { /* ignore */ }
 };

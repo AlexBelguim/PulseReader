@@ -27,6 +27,31 @@ import {
 import { addBook, updateBookProgress, updateBook, deleteBook, resetAllProgress } from '../services/db';
 import UserManagement from './UserManagement';
 
+const formatMB = (bytes) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+
+/** What Full Sync is doing right now: the step, or which book is downloading and how far. */
+const SyncProgress = ({ progress }) => {
+    if (progress.step !== 'download') {
+        return <p className="sync-progress-text">{progress.message}</p>;
+    }
+    const { index, total, title, loaded, size } = progress;
+    const bookShare = size ? Math.min(1, loaded / size) : 0;
+    const overall = Math.round(((index - 1 + bookShare) / total) * 100);
+    return (
+        <div className="sync-progress" role="status" aria-live="polite">
+            <p className="sync-progress-text">
+                Downloading {index} of {total}: <span className="sync-progress-title">{title}</span>
+            </p>
+            <div className="sync-progress-bar" aria-hidden="true">
+                <div className="sync-progress-fill" style={{ width: `${overall}%` }} />
+            </div>
+            <p className="sync-progress-detail">
+                {size ? `${formatMB(loaded)} of ${formatMB(size)}` : formatMB(loaded)} · {overall}% of the library
+            </p>
+        </div>
+    );
+};
+
 const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onClose }) => {
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
@@ -35,6 +60,8 @@ const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onC
     const [authError, setAuthError] = useState(null);
     const [syncing, setSyncing] = useState(false);
     const [syncResult, setSyncResult] = useState(null);
+    // Live Full Sync status, so a long download doesn't look stalled.
+    const [syncProgress, setSyncProgress] = useState(null);
     const [changingPassword, setChangingPassword] = useState(false);
     const [passwords, setPasswords] = useState({ current: '', next: '' });
     const [passwordNotice, setPasswordNotice] = useState(null);
@@ -108,8 +135,18 @@ const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onC
     const handleSync = async () => {
         setSyncing(true);
         setSyncResult(null);
+        setSyncProgress(null);
 
         try {
+            // Byte updates arrive per network chunk; a few a second is plenty.
+            let lastShown = 0;
+            const showProgress = (p) => {
+                const now = Date.now();
+                const finishedBook = p.step === 'download' && p.size && p.loaded >= p.size;
+                if (p.step === 'download' && p.loaded && !finishedBook && now - lastShown < 150) return;
+                lastShown = now;
+                setSyncProgress(p);
+            };
             const result = await performFullSync(
                 books,
                 async (bookData) => {
@@ -124,7 +161,8 @@ const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onC
                 },
                 async (id) => {
                     await deleteBook(id);
-                }
+                },
+                showProgress
             );
 
             setSyncResult(result);
@@ -426,6 +464,8 @@ const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onC
                                 )}
                                 {syncing ? 'Syncing...' : 'Full Sync (books + metadata)'}
                             </button>
+
+                            {syncing && syncProgress && <SyncProgress progress={syncProgress} />}
 
                             <button
                                 className="btn btn-secondary btn-full"

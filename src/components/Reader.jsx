@@ -266,7 +266,10 @@ const Reader = () => {
                 }
                 if (!layer.childNodes.length) return;
                 clearFlash();
-                document.body.appendChild(layer);
+                // Inside the reader, not on <body>: the reader container is
+                // position: fixed (its own stacking context), so on <body> the
+                // highlight sat above everything in it, the RSVP overlay too.
+                (viewerRef.current?.closest('.reader-container') || document.body).appendChild(layer);
                 flashLayerRef.current = layer;
                 setTimeout(() => layer.classList.add('fading'), 2400);
                 setTimeout(() => {
@@ -279,6 +282,12 @@ const Reader = () => {
             // flash is a best-effort visual hint
         }
     }, [clearFlash]);
+
+    // A "you were here" highlight still fading when RSVP opens would show
+    // over the word display; RSVP has its own focus, so drop it.
+    useEffect(() => {
+        if (showRSVP) clearFlash();
+    }, [showRSVP, clearFlash]);
 
     // display(cfi) shows the page holding the CFI's exact point, and the
     // page-start CFI epub.js reports usually points at the space that ends the
@@ -1364,6 +1373,8 @@ const Reader = () => {
                 startWord={rsvpStartWord}
                 wpm={settings.rsvpSpeed}
                 onWpmChange={(newWpm) => updateSetting('rsvpSpeed', newWpm)}
+                tone={settings.rsvpTone}
+                onToneChange={(tone) => updateSetting('rsvpTone', tone)}
                 onStopAtImage={handleRSVPStopAtImage}
                 onProgress={handleRSVPProgress}
                 onCloseWithPosition={handleRSVPCloseWithPosition}

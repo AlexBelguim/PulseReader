@@ -5,6 +5,12 @@
  * sets an HttpOnly session cookie that every request carries.
  */
 
+import { getBookData } from './db.js';
+
+// Size of a local book's epub, for matching renamed books by size. The
+// library list keeps only the size; older records may still carry the file.
+const localFileSize = (book) => book.fileSize || book.data?.byteLength || book.data?.size || 0;
+
 // Relative to the page, so the app also works behind a reverse proxy that
 // mounts it under a sub-path (https://example.com/reader/).
 const serverUrl = (endpoint) => new URL(endpoint.replace(/^\//, ''), document.baseURI).href;
@@ -158,9 +164,29 @@ export async function getServerBooks() {
 /**
  * Download an epub file from the server
  */
-export async function downloadBook(bookId) {
+export async function downloadBook(bookId, onBytes) {
     const response = await syncFetch(`/api/books/${bookId}/download`);
-    return response.arrayBuffer();
+    const total = Number(response.headers.get('Content-Length')) || 0;
+    if (!onBytes || !response.body?.getReader) return response.arrayBuffer();
+
+    // Read it in chunks so the sync panel can show how far along it is.
+    const reader = response.body.getReader();
+    const chunks = [];
+    let loaded = 0;
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        loaded += value.length;
+        onBytes(loaded, total);
+    }
+    const out = new Uint8Array(loaded);
+    let offset = 0;
+    for (const chunk of chunks) {
+        out.set(chunk, offset);
+        offset += chunk.length;
+    }
+    return out.buffer;
 }
 
 /**
@@ -344,8 +370,8 @@ function matchLocalToServer(localBooks, serverBooks) {
                 serverBook = serverByTitle.get(key);
             }
         }
-        if (!serverBook && localBook.data) {
-            const localSize = localBook.data.byteLength || localBook.data.size || 0;
+        if (!serverBook) {
+            const localSize = localFileSize(localBook);
             if (localSize > 0 && serverByFileSize.has(localSize) && !matchedServerIds.has(serverByFileSize.get(localSize).id)) {
                 serverBook = serverByFileSize.get(localSize);
             }
@@ -485,7 +511,12 @@ export async function updateServerBook(bookId, updates) {
  * 7. Delete local books that have a syncId but no longer exist on server (server deleted them)
  * 8. Sync reading progress
  */
-export async function performFullSync(localBooks, addBookFn, updateProgressFn, updateBookFn, deleteBookFn) {
+/**
+ * `onProgress` (optional) is called as the sync moves along, so a long one
+ * doesn't look stalled: { step, message } for each phase, plus { index, total,
+ * title, loaded, size } while books download.
+ */
+export async function performFullSync(localBooks, addBookFn, updateProgressFn, updateBookFn, deleteBookFn, onProgress = () => {}) {
     if (!isServerConnected()) {
         return { synced: false, reason: 'Not signed in to the PulseReader server' };
     }
@@ -503,6 +534,7 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
     try {
         // Trigger a rescan first so the server DB reflects current disk state
         // (handles renamed/moved/deleted files on the server)
+        onProgress({ step: 'scan', message: "Scanning the server's books folder…" });
         try {
             await triggerRescan();
         } catch (err) {
@@ -510,6 +542,7 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
         }
 
         // Get server state (now up-to-date after rescan)
+        onProgress({ step: 'compare', message: 'Comparing libraries…' });
         const serverStatus = await getSyncStatus();
         const serverBooks = serverStatus.books;
 
@@ -549,8 +582,8 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
             }
 
             // Fall back to file size matching (handles renamed books)
-            if (!serverBook && localBook.data) {
-                const localSize = localBook.data.byteLength || localBook.data.size || 0;
+            if (!serverBook) {
+                const localSize = localFileSize(localBook);
                 if (localSize > 0 && serverByFileSize.has(localSize) && !matchedServerIds.has(serverByFileSize.get(localSize).id)) {
                     serverBook = serverByFileSize.get(localSize);
                 }
@@ -615,11 +648,13 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
         }
 
         // --- Step 2: Download books that exist on server but not locally ---
-        for (const serverBook of serverBooks) {
-            if (matchedServerIds.has(serverBook.id)) continue;
-
+        const toDownload = serverBooks.filter((b) => !matchedServerIds.has(b.id));
+        for (const [i, serverBook] of toDownload.entries()) {
+            const status = { step: 'download', index: i + 1, total: toDownload.length, title: serverBook.title };
+            onProgress({ ...status, loaded: 0, size: serverBook.file_size || 0 });
             try {
-                const epubData = await downloadBook(serverBook.id);
+                const epubData = await downloadBook(serverBook.id, (loaded, size) =>
+                    onProgress({ ...status, loaded, size: size || serverBook.file_size || 0 }));
                 const cover = await downloadCover(serverBook.id);
 
                 await addBookFn({
@@ -682,8 +717,12 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
                 }
             } else {
                 // This book was added locally and never synced → upload to server
+                onProgress({ step: 'upload', message: `Uploading "${localBook.title}"…` });
                 try {
-                    const serverResult = await uploadBook(localBook.data, {
+                    // The library list doesn't carry file contents; fetch this one.
+                    const data = localBook.data || await getBookData(localBook.id);
+                    if (!data) throw new Error('the book file is missing on this device');
+                    const serverResult = await uploadBook(data, {
                         title: localBook.title,
                         author: localBook.author,
                         series: localBook.series || 'Uncategorized',
@@ -717,6 +756,7 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
 
         // Always call syncProgress (even with empty array) so we receive
         // the server's current state, including changes from other devices.
+        onProgress({ step: 'progress', message: 'Syncing reading progress…' });
         const syncResult = await syncProgress(progressUpdates);
 
         for (const row of syncResult.progress || []) {

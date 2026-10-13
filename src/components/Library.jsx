@@ -22,6 +22,7 @@ import {
     updateBook,
     toggleBookRead,
     requestPersistentStorage,
+    getBookData,
 } from '../services/db';
 import {
     getServerStatus,
@@ -134,8 +135,11 @@ const Library = () => {
 
     // Extract covers from epub data for books that don't have covers
     const extractMissingCovers = async (bookList) => {
+        // Each book is looked at once. Books whose epub has no cover image or
+        // no author (every server-scanned book starts as "Unknown Author")
+        // used to be re-opened and parsed on every visit to the library.
         const needsUpdate = bookList.filter(
-            (b) => b.data && (!b.cover || !b.author || b.author === 'Unknown Author')
+            (b) => !b.metaChecked && (!b.cover || !b.author || b.author === 'Unknown Author')
         );
         if (needsUpdate.length === 0) return;
 
@@ -145,8 +149,10 @@ const Library = () => {
         for (let i = 0; i < needsUpdate.length; i++) {
             const book = needsUpdate[i];
             try {
-                const extracted = await extractFromEpubZip(book.data);
-                const updates = {};
+                const data = await getBookData(book.id);
+                if (!data) continue;
+                const extracted = await extractFromEpubZip(data);
+                const updates = { metaChecked: true };
 
                 if (!book.cover && extracted.cover) {
                     updates.cover = extracted.cover;
@@ -155,10 +161,8 @@ const Library = () => {
                     updates.author = extracted.author;
                 }
 
-                if (Object.keys(updates).length > 0) {
-                    await updateBook(book.id, updates);
-                    totalUpdated++;
-                }
+                await updateBook(book.id, updates);
+                if (updates.cover || updates.author) totalUpdated++;
             } catch (err) {
                 // Silently skip - don't spam console
             }
