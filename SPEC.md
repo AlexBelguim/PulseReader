@@ -263,11 +263,11 @@ deleteBook(id)        // Remove book
 }
 ```
 
-### Google Fonts to Load
+### Fonts (bundled in `public/fonts`, see `src/utils/fonts.js`)
 - Inter (300-700) — Default UI & sans reading
 - JetBrains Mono — RSVP display
 - Georgia — Already system, no load needed
-- Optional: Literata, Comfortaa, OpenDyslexic for reading
+- Literata, Comfortaa, OpenDyslexic for reading
 
 ### Component Classes
 

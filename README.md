@@ -22,6 +22,7 @@ so reading keeps working offline.
 
 **Reader**
 - Font, size, weight, line spacing, margins, alignment and colour themes, including OLED black.
+- Inter, Literata, Comfortaa and OpenDyslexic ship with the app: they work offline, and nothing is loaded from Google or any other third party.
 - Paginated or scrolling, two-page spread in landscape, fullscreen.
 - Kindle-style taps on mobile: left/right edge turns the page, middle or top shows the controls.
 - Page X of Y for *your* screen and font, updated when you fold/unfold a foldable or rotate.
@@ -170,4 +171,5 @@ Express and SQLite.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). The bundled fonts in [`public/fonts`](public/fonts) are under the
+SIL Open Font License 1.1; their licenses are next to them.
