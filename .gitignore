@@ -36,3 +36,6 @@ docker-compose.override.yml
 /data
 # Old per-folder compose file; may hold a real key. Use the root docker-compose.yml + .env.
 sync-server/docker-compose.yml
+
+# Claude Code local files (launch config, test fixtures)
+.claude/
