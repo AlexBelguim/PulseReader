@@ -971,8 +971,12 @@ const Reader = () => {
                     setTimeout(endReflow, 150);
                 });
         } else if (wordInfo?.parent) {
-            // Fallback: just highlight without navigation
+            // Fallback: just highlight without navigation. Only here does the
+            // word still need bringing into view. After landOnCfi it is already
+            // on the page, and a smooth scroll there outlives the reflow guard:
+            // its relocated reports the page start and replaces the exact word.
             highlightLastWord(wordInfo);
+            wordInfo.parent.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
         // highlightLastWord is deliberately absent: it is declared below this
         // callback, so naming it here would hit the TDZ during render.
@@ -991,9 +995,6 @@ const Reader = () => {
             parent.style.backgroundColor = 'rgba(255, 75, 75, 0.4)';
             parent.style.boxShadow = '0 0 10px rgba(255, 75, 75, 0.6)';
             parent.style.borderRadius = '4px';
-
-            // Scroll the element into view if needed
-            parent.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
             // Remove highlight after 5 seconds
             setTimeout(() => {

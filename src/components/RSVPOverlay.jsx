@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { EpubCFI } from 'epubjs';
-import { tokenizeWithOffsets } from '../utils/tokenize';
+import { displayWord, isTitle, tokenizeWithOffsets } from '../utils/tokenize';
 import {
     X,
     Play,
@@ -49,6 +49,24 @@ function isIllustration(node) {
     return w >= MIN_ILLUSTRATION_PX && h >= MIN_ILLUSTRATION_PX;
 }
 
+// Where a word is drawn, in the parent document's coordinates, or null.
+function wordRect(node, offset, length) {
+    if (!node) return null;
+    const range = node.ownerDocument.createRange();
+    range.setStart(node, offset);
+    range.setEnd(node, offset + length);
+    const r = range.getBoundingClientRect();
+    const frame = node.ownerDocument.defaultView?.frameElement?.getBoundingClientRect();
+    if (!frame || (!r.width && !r.height)) return null;
+    return { left: frame.left + r.left, right: frame.left + r.right, top: frame.top + r.top, bottom: frame.top + r.bottom };
+}
+
+function isRectOnScreen(r, box, scrolled) {
+    return Boolean(r) && (scrolled
+        ? r.top < box.bottom && r.bottom > box.top
+        : r.left < box.right && r.right > box.left);
+}
+
 /**
  * Index of the first word that is on screen, or -1. Words run in document
  * order, and in paginated mode the page a word is on never goes down as the
@@ -60,17 +78,7 @@ function firstWordOnScreen(rendition, textNodes, offsets, words) {
         const box = rendition?.manager?.container?.getBoundingClientRect?.();
         if (!box || !textNodes.length) return -1;
         const scrolled = rendition.settings?.flow === 'scrolled';
-        const rectOf = (i) => {
-            const node = textNodes[i];
-            if (!node) return null;
-            const range = node.ownerDocument.createRange();
-            range.setStart(node, offsets[i]);
-            range.setEnd(node, offsets[i] + words[i].length);
-            const r = range.getBoundingClientRect();
-            const frame = node.ownerDocument.defaultView?.frameElement?.getBoundingClientRect();
-            if (!frame || (!r.width && !r.height)) return null;
-            return { left: frame.left + r.left, right: frame.left + r.right, top: frame.top + r.top, bottom: frame.top + r.bottom };
-        };
+        const rectOf = (i) => wordRect(textNodes[i], offsets[i], words[i].length);
         const before = (r) => (scrolled ? r.bottom <= box.top + 1 : r.right <= box.left + 1);
         let lo = 0;
         let hi = textNodes.length;
@@ -81,10 +89,33 @@ function firstWordOnScreen(rendition, textNodes, offsets, words) {
             else hi = mid;
         }
         const r = lo < textNodes.length ? rectOf(lo) : null;
-        const visible = r && (scrolled
-            ? r.top < box.bottom && r.bottom > box.top
-            : r.left < box.right && r.right > box.left);
-        return visible ? lo : -1;
+        return isRectOnScreen(r, box, scrolled) ? lo : -1;
+    } catch {
+        return -1;
+    }
+}
+
+/**
+ * Index of the word `cfi` points into if that word is on screen, or -1. After
+ * leaving RSVP the saved CFI is the word reading stopped on, and that is where
+ * to carry on. After a page turn it is the page start instead, which can sit on
+ * the page before (a location's start often points at the space ending the
+ * previous line), so anything off screen is left to firstWordOnScreen.
+ */
+function wordOnScreenAtCfi(rendition, contents, cfi, textNodes, offsets, words) {
+    try {
+        const box = rendition?.manager?.container?.getBoundingClientRect?.();
+        if (!box || !cfi) return -1;
+        const { spinePos } = new EpubCFI(cfi);
+        const range = contents.find((c) => c.sectionIndex === spinePos)?.range(cfi);
+        if (!range) return -1;
+        let index = -1;
+        for (let i = 0; i < textNodes.length; i++) {
+            if (textNodes[i] === range.startContainer && offsets[i] <= range.startOffset) index = i;
+        }
+        if (index === -1) return -1;
+        const r = wordRect(textNodes[index], offsets[index], words[index].length);
+        return isRectOnScreen(r, box, rendition.settings?.flow === 'scrolled') ? index : -1;
     } catch {
         return -1;
     }
@@ -95,6 +126,7 @@ const RSVPOverlay = ({
     onClose,
     rendition,
     startWord,
+    startCfi,
     wpm: initialWpm = 300,
     onWpmChange,
     tone = 'bright',
@@ -149,6 +181,10 @@ const RSVPOverlay = ({
     // the reader is being torn down (leaving with RSVP open), when
     // rendition.getContents() is already empty.
     const cfiBasesRef = useRef(new WeakMap());
+    // A ref, not an extractText dependency: Reader updates this position as
+    // RSVP reads, and each change would re-extract and restart mid-chapter.
+    const startCfiRef = useRef(startCfi);
+    startCfiRef.current = startCfi;
 
     // Calculate base interval from WPM
     const getBaseInterval = useCallback(() => {
@@ -165,14 +201,15 @@ const RSVPOverlay = ({
 
         let multiplier = 1;
         const lastChar = word.slice(-1);
-        const isSentenceEnd = ['.', '!', '?'].includes(lastChar);
+        // "Mr." on its own (as in "Mr. and Mrs. Dursley") ends no sentence.
+        const isSentenceEnd = ['.', '!', '?'].includes(lastChar) && !isTitle(word);
 
         // Sentence-ending punctuation multiplier (. ! ?)
         if (sentenceEndMultiplier > 1 && isSentenceEnd) {
             multiplier *= sentenceEndMultiplier;
         }
-        // Clause punctuation multiplier (, ; :)
-        else if (clauseMultiplier > 1 && [',', ';', ':'].includes(lastChar)) {
+        // Clause punctuation multiplier (, ; : and a dash breaking off the sentence)
+        else if (clauseMultiplier > 1 && [',', ';', ':', '—', '–', '-'].includes(lastChar)) {
             multiplier *= clauseMultiplier;
         }
 
@@ -193,8 +230,9 @@ const RSVPOverlay = ({
         prevWordEndedSentenceRef.current = isSentenceEnd;
 
         // Length multiplier: per-char increase for every character over 6
-        if (longWordMultiplier > 1 && word.length > 6) {
-            multiplier *= (1 + (word.length - 6) * (longWordMultiplier - 1));
+        const shownLength = displayWord(word).length;
+        if (longWordMultiplier > 1 && shownLength > 6) {
+            multiplier *= (1 + (shownLength - 6) * (longWordMultiplier - 1));
         }
 
         return Math.round(base * multiplier);
@@ -446,7 +484,6 @@ const RSVPOverlay = ({
                     // down a paragraph rewound to the top of it.
                     let firstInNode = -1;
                     let bestByOffset = -1;
-                    let bestDelta = Infinity;
                     for (let i = 0; i < displayTextNodes.length; i++) {
                         const tn = displayTextNodes[i];
                         const exact = tn === targetNode;
@@ -454,13 +491,11 @@ const RSVPOverlay = ({
                         if (firstInNode === -1) firstInNode = i;
                         // Offsets only mean anything inside the node they were
                         // measured in. The parentElement branch can span several
-                        // sibling text nodes, so it cannot use them.
-                        if (exact && typeof targetOffset === 'number') {
-                            const delta = Math.abs(displayOffsets[i] - targetOffset);
-                            if (delta < bestDelta) {
-                                bestDelta = delta;
-                                bestByOffset = i;
-                            }
+                        // sibling text nodes, so it cannot use them. The last word
+                        // starting at or before the press is the one containing
+                        // it, which for "Dr. Li" may start well before the press.
+                        if (exact && typeof targetOffset === 'number' && displayOffsets[i] <= targetOffset) {
+                            bestByOffset = i;
                         }
                     }
                     const picked = bestByOffset !== -1 ? bestByOffset : firstInNode;
@@ -478,8 +513,10 @@ const RSVPOverlay = ({
                         }
                     }
                 }
+            } else if ((startIdx = wordOnScreenAtCfi(rendition, contents, startCfiRef.current, displayTextNodes, displayOffsets, displayWords)) >= 0) {
+                // Priority 2: the word RSVP was left on, if this is still its page.
             } else if ((startIdx = firstWordOnScreen(rendition, displayTextNodes, displayOffsets, displayWords)) >= 0) {
-                // Priority 2: the first word actually on screen. (Found by
+                // Priority 3: the first word actually on screen. (Found by
                 // geometry: the node comparison below works per text node, and
                 // one paragraph's text node spans many pages, so it started
                 // RSVP at the top of the paragraph -- often pages back.)
@@ -663,12 +700,15 @@ const RSVPOverlay = ({
     // Calculate ORP (Optimal Recognition Point) index
     const getORPIndex = useCallback((word) => {
         if (!word) return 0;
-        return Math.floor(word.length * 0.35);
+        // In "Mr. Dursley" the name sits where it would on its own, with the
+        // title to its left. 35% of the whole thing lands on the space.
+        const nameStart = word.lastIndexOf(' ') + 1;
+        return nameStart + Math.floor((word.length - nameStart) * 0.35);
     }, []);
 
     // Get word display parts (before, highlight, after)
     const wordDisplay = useMemo(() => {
-        const word = words[currentIndex] || '';
+        const word = displayWord(words[currentIndex] || '');
         if (!word) return { before: '', highlight: '', after: '' };
 
         const orpIdx = getORPIndex(word);
