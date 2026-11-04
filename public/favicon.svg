@@ -1,9 +1,12 @@
 <svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="PulseReader">
-  <!-- The RSVP focus reticle: guide marks above and below the fixation point,
-       with the word you are on held between them. Red is --color-primary
-       (#ff4b4b), the same accent used for the ORP letter in the reader. -->
-  <rect width="48" height="48" rx="11" fill="#000000"/>
-  <rect x="22" y="8"  width="4"  height="7" rx="2" fill="#ff4b4b"/>
-  <rect x="22" y="33" width="4"  height="7" rx="2" fill="#ff4b4b"/>
-  <rect x="10" y="21" width="28" height="6" rx="3" fill="#e0e0e0" opacity=".8"/>
+  <!-- An open book with a pulse across its pages: reading, at speed. Red is
+       the app's primary colour (#ff4b4b), the same accent used for the ORP
+       letter in the reader. No double hyphen in here: it ends an XML comment
+       early, and the browser then shows no icon at all. The PNGs are drawn
+       from this file: node tools/make_icons.mjs -->
+  <rect width="48" height="48" rx="11" fill="#17181d"/>
+  <g transform="translate(0 1)">
+    <path d="M23 13c-4-2.5-9-3-14-1.5v22c5-1.5 10-1 14 1.5zM25 13c4-2.5 9-3 14-1.5v22c-5-1.5-10-1-14 1.5z" fill="#e6e6e8"/>
+    <path d="M11.5 22.5h4l2-4 3 9 2.5-7 1.5 2h12" fill="none" stroke="#ff4b4b" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
 </svg>

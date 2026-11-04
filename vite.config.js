@@ -39,7 +39,7 @@ export default defineConfig({
           {
             // A maskable icon needs its own file: Android crops to a circle or
             // squircle, and the standard icon's mark runs too close to the
-            // edge to survive that. This one is full-bleed with the reticle
+            // edge to survive that. This one is full-bleed with the book
             // held inside the centre 80% safe zone.
             src: 'pwa-maskable-512x512.png',
             sizes: '512x512',
