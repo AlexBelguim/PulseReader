@@ -74,7 +74,7 @@ export async function scanBooksFolder(db, booksDir) {
         return 0;
     }
 
-    const existingBooks = db.prepare('SELECT id, filepath, file_hash FROM books').all();
+    const existingBooks = db.prepare('SELECT id, filepath, file_hash, cover_path FROM books').all();
     const existingByPath = new Map(existingBooks.map((b) => [b.filepath, b]));
     const seenPaths = new Set();
     let count = 0;
@@ -123,6 +123,20 @@ export async function scanBooksFolder(db, booksDir) {
         return match;
     };
 
+    /**
+     * The cover a book already in the database should have after this scan.
+     * Covers used to be looked at only when the epub itself changed, so a
+     * cover dropped in next to a known book never showed up. An image named
+     * after the book always wins; otherwise a cover the book already has is
+     * kept while its file is still there (an uploaded one need not follow the
+     * naming), and only a book with no cover falls back to the series cover.
+     */
+    const coverFor = (stored, ownCover, seriesCover) => {
+        if (ownCover) return ownCover;
+        if (stored && fs.existsSync(path.join(booksDir, stored))) return stored;
+        return seriesCover;
+    };
+
     const entries = fs.readdirSync(booksDir, { withFileTypes: true });
 
     for (const entry of entries) {
@@ -131,7 +145,8 @@ export async function scanBooksFolder(db, booksDir) {
         if (entry.isDirectory()) {
             // This is a series folder
             const seriesName = entry.name;
-            const seriesCover = findCoverImage(fullPath);
+            const seriesCoverFile = findCoverImage(fullPath);
+            const seriesCover = seriesCoverFile ? path.relative(booksDir, seriesCoverFile) : null;
             const seriesFiles = fs.readdirSync(fullPath, { withFileTypes: true });
 
             for (const file of seriesFiles) {
@@ -148,27 +163,30 @@ export async function scanBooksFolder(db, booksDir) {
                 const fileSize = fs.statSync(epubPath).size;
 
                 // Check for per-book cover (same name as epub but image extension)
-                let bookCover = null;
+                let ownCover = null;
                 for (const coverExt of COVER_EXTENSIONS) {
                     const coverPath = path.join(fullPath, title + coverExt);
                     if (fs.existsSync(coverPath)) {
-                        bookCover = path.relative(booksDir, coverPath);
+                        ownCover = path.relative(booksDir, coverPath);
                         break;
                     }
                 }
                 // Fall back to series cover
-                if (!bookCover && seriesCover) {
-                    bookCover = path.relative(booksDir, seriesCover);
-                }
+                const bookCover = ownCover || seriesCover;
 
                 const existing = existingByPath.get(relativePath);
                 if (existing) {
+                    const cover = coverFor(existing.cover_path, ownCover, seriesCover);
                     // Update if file changed
                     if (existing.file_hash !== fileHash) {
                         db.prepare(`
-                            UPDATE books SET file_hash = ?, file_size = ?, cover_path = ?, 
+                            UPDATE books SET file_hash = ?, file_size = ?, cover_path = ?,
                             series = ?, updated_at = datetime('now') WHERE id = ?
-                        `).run(fileHash, fileSize, bookCover, seriesName, existing.id);
+                        `).run(fileHash, fileSize, cover, seriesName, existing.id);
+                    } else if (cover !== existing.cover_path) {
+                        db.prepare(`
+                            UPDATE books SET cover_path = ?, updated_at = datetime('now') WHERE id = ?
+                        `).run(cover, existing.id);
                     }
                 } else {
                     const renamed = claimRenamedRow(fileHash, relativePath);
@@ -210,11 +228,16 @@ export async function scanBooksFolder(db, booksDir) {
 
             const existing = existingByPath.get(relativePath);
             if (existing) {
+                const cover = coverFor(existing.cover_path, bookCover, null);
                 if (existing.file_hash !== fileHash) {
                     db.prepare(`
                         UPDATE books SET file_hash = ?, file_size = ?, cover_path = ?,
                         updated_at = datetime('now') WHERE id = ?
-                    `).run(fileHash, fileSize, bookCover, existing.id);
+                    `).run(fileHash, fileSize, cover, existing.id);
+                } else if (cover !== existing.cover_path) {
+                    db.prepare(`
+                        UPDATE books SET cover_path = ?, updated_at = datetime('now') WHERE id = ?
+                    `).run(cover, existing.id);
                 }
             } else {
                 const renamed = claimRenamedRow(fileHash, relativePath);

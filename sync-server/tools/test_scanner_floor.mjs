@@ -90,6 +90,37 @@ check('the copy does not steal the original row', origStill?.series === 'Classic
 check('the original keeps its progress after a copy appears',
     db.prepare("SELECT progress FROM reading_progress WHERE book_id='b1'").get()?.progress === 0.62);
 
+// 7. A cover added after the book was scanned is picked up. Covers used to be
+//    refreshed only when the epub changed, so a known book never got one.
+const coverOf = (id) => db.prepare('SELECT cover_path FROM books WHERE id = ?').get(id)?.cover_path ?? null;
+check('no cover before one is added', coverOf('b1') === null, String(coverOf('b1')));
+fs.writeFileSync(path.join(otherDir, 'cover.jpg'), 'img');
+await scanBooksFolder(db, booksDir);
+check('a series cover added later is picked up',
+    coverOf('b1') === path.join('Classics', 'cover.jpg'), String(coverOf('b1')));
+
+// 8. An image named after the book wins over the series cover.
+fs.writeFileSync(path.join(otherDir, 'Dune (1965).png'), 'img');
+await scanBooksFolder(db, booksDir);
+check("the book's own cover wins over the series cover",
+    coverOf('b1') === path.join('Classics', 'Dune (1965).png'), String(coverOf('b1')));
+
+// 9. Deleting that image falls back to the series cover, not to nothing.
+fs.rmSync(path.join(otherDir, 'Dune (1965).png'));
+await scanBooksFolder(db, booksDir);
+check('a deleted own cover falls back to the series cover',
+    coverOf('b1') === path.join('Classics', 'cover.jpg'), String(coverOf('b1')));
+
+// 10. A cover the book already has, under a name the scanner would not pick
+//     (an upload), is not replaced by the series cover.
+const copyId = db.prepare("SELECT id FROM books WHERE filename = 'Dune copy.epub'").get().id;
+fs.writeFileSync(path.join(seriesDir, 'uploaded.webp'), 'img');
+db.prepare('UPDATE books SET cover_path = ? WHERE id = ?').run(path.join('SciFi', 'uploaded.webp'), copyId);
+fs.writeFileSync(path.join(seriesDir, 'cover.jpg'), 'img');
+await scanBooksFolder(db, booksDir);
+check('an existing uploaded cover is kept over the series cover',
+    coverOf(copyId) === path.join('SciFi', 'uploaded.webp'), String(coverOf(copyId)));
+
 let failed = 0;
 console.log('\n--- scanner floor ---');
 for (const r of results) { if (!r.pass) failed++; console.log(`${r.pass ? 'PASS' : 'FAIL'}  ${r.n}${r.detail ? `  (${r.detail})` : ''}`); }
