@@ -34,6 +34,7 @@ sync-server/node_modules
 docker-compose.override.yml
 /books
 /data
+/audio
 # Old per-folder compose file; may hold a real key. Use the root docker-compose.yml + .env.
 sync-server/docker-compose.yml
 

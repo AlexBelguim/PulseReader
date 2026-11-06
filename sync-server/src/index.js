@@ -8,6 +8,8 @@ import { authMiddleware, authRouter, requireAdmin } from './middleware/auth.js';
 import { usersRouter } from './routes/users.js';
 import { bootstrapAdmin } from './users.js';
 import { scanBooksFolder } from './scanner.js';
+import { createAudioLibrary } from './audiobooks.js';
+import { audiobooksRouter } from './routes/audiobooks.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -16,6 +18,8 @@ const VERSION = '1.0.0';
 const app = express();
 const PORT = process.env.PORT || 3000;
 const BOOKS_DIR = process.env.BOOKS_DIR || './data/books';
+// Audiobooks are optional: no folder, no audiobooks. Only ever read.
+const AUDIO_DIR = process.env.AUDIO_DIR || './data/audio';
 const API_KEY = process.env.API_KEY || '';
 // The built web app. In the Docker image it sits next to src/; in a checkout
 // it is the repo's dist/ after `npm run build`.
@@ -30,6 +34,9 @@ fs.mkdirSync(path.join(dataDir, 'db'), { recursive: true });
 
 // Initialize database
 const db = initDB(path.join(dataDir, 'db', 'pulsereader.db'));
+// Covers taken out of audio files live with the database, so the audio
+// folder can stay read-only.
+const audioLibrary = createAudioLibrary(db, AUDIO_DIR, path.join(dataDir, 'db', 'audio-covers'));
 
 // Every book and reading position is behind a sign-in. The first admin comes
 // from ADMIN_USERNAME / ADMIN_PASSWORD (or API_KEY, for setups from before
@@ -83,7 +90,8 @@ app.use('/api', authMiddleware(db, API_KEY));
 app.use('/api/users', requireAdmin, usersRouter(db));
 app.use('/api/books', booksRouter(db, BOOKS_DIR));
 app.use('/api/progress', progressRouter(db));
-app.use('/api/sync', syncRouter(db, BOOKS_DIR));
+app.use('/api/audiobooks', audiobooksRouter(db, audioLibrary));
+app.use('/api/sync', syncRouter(db, BOOKS_DIR, audioLibrary));
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
 // Errors thrown before a route's own try/catch (a rejected upload, a body
@@ -119,6 +127,12 @@ scanBooksFolder(db, BOOKS_DIR).then((count) => {
     console.log(`Found ${count} books in library`);
 }).catch((err) => {
     console.error('Initial scan failed:', err.message);
+}).then(() => {
+    if (!fs.existsSync(AUDIO_DIR)) return;
+    console.log(`Scanning audio folder: ${AUDIO_DIR}`);
+    return audioLibrary.scan().then((count) => console.log(`Found ${count} audiobooks`));
+}).catch((err) => {
+    console.error('Audio scan failed:', err.message);
 });
 
 app.listen(PORT, '0.0.0.0', (err) => {
@@ -130,6 +144,7 @@ app.listen(PORT, '0.0.0.0', (err) => {
     }
     console.log(`PulseReader v${VERSION} running on http://localhost:${PORT}`);
     console.log(`Books directory: ${path.resolve(BOOKS_DIR)}`);
+    console.log(`Audio directory: ${path.resolve(AUDIO_DIR)}${fs.existsSync(AUDIO_DIR) ? '' : ' (not there: no audiobooks)'}`);
     console.log(WEB_DIR ? `Serving web app from ${WEB_DIR}` : 'Web app not found - API only');
     console.log(`Users: ${db.prepare('SELECT COUNT(*) n FROM users').get().n}`);
 });

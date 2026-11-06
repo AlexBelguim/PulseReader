@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { scanBooksFolder } from '../scanner.js';
 import { applyProgressUpdates } from '../progressMerge.js';
 
-export function syncRouter(db, booksDir) {
+export function syncRouter(db, booksDir, audioLibrary) {
     const router = Router();
 
     /**
@@ -39,7 +39,9 @@ export function syncRouter(db, booksDir) {
     router.post('/rescan', async (req, res) => {
         try {
             const count = await scanBooksFolder(db, booksDir);
-            res.json({ success: true, book_count: count });
+            // Full Sync starts with this, so it picks up new audiobooks too.
+            const audioCount = audioLibrary ? await audioLibrary.scan() : 0;
+            res.json({ success: true, book_count: count, audiobook_count: audioCount });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }

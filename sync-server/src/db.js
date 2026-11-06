@@ -81,5 +81,41 @@ export function initDB(dbPath) {
     }
     normalizeProgressTimes(db);
 
+    // Audiobooks live in their own folder (AUDIO_DIR) and only stream from
+    // the server, so they have their own catalog and their own progress: a
+    // position in seconds, not an epub location.
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS audiobooks (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            author TEXT DEFAULT 'Unknown Author',
+            series TEXT DEFAULT 'Uncategorized',
+            kind TEXT NOT NULL DEFAULT 'file',  -- 'file': one audio file; 'folder': a folder of tracks
+            filename TEXT NOT NULL,       -- file or folder name, for sorting
+            filepath TEXT NOT NULL,       -- relative to AUDIO_DIR: the file, or the folder of tracks
+            cover_path TEXT,              -- relative to AUDIO_DIR
+            embedded_cover TEXT,          -- file name under the data dir's audio-covers/
+            duration REAL DEFAULT 0,      -- seconds
+            tracks TEXT NOT NULL DEFAULT '[]',    -- [{ file, start, duration }]
+            chapters TEXT NOT NULL DEFAULT '[]',  -- [{ title, start }], in book time
+            file_hash TEXT,
+            file_size INTEGER DEFAULT 0,
+            added_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_audiobooks_series ON audiobooks(series);
+
+        CREATE TABLE IF NOT EXISTS audio_progress (
+            user_id INTEGER NOT NULL,
+            audiobook_id TEXT NOT NULL,
+            position REAL DEFAULT 0,      -- seconds into the whole book
+            finished INTEGER DEFAULT 0,
+            updated_at TEXT,              -- when it was listened (device time)
+            PRIMARY KEY (user_id, audiobook_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (audiobook_id) REFERENCES audiobooks(id) ON DELETE CASCADE
+        );
+    `);
+
     return db;
 }

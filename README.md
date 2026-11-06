@@ -28,6 +28,12 @@ so reading keeps working offline.
 - Page X of Y for *your* screen and font, updated when you fold/unfold a foldable or rotate.
 - Table of contents, progress slider, keyboard shortcuts.
 
+**Audiobooks**
+- Drop `.m4b`, `.mp3` (or `.m4a`, `.ogg`, `.opus`, `.flac`) books in an audio folder and they show up under **Audiobooks**, streamed from the server.
+- Chapters are read from the file (m4b chapters, mp3 CHAP tags); a book split over several files plays as one, each file a chapter.
+- Picks up where you left off, on any device: the position is saved per account, and the most recent listen wins.
+- Lock screen and headphone controls, skip back 15 / forward 30 seconds, speed from 0.5x to 3x, and a sleep timer (15, 30, 60 minutes or the end of the chapter).
+
 **Library and sync**
 - Your books live on the server as plain files, one folder per series. Drop epubs in, and they show up.
 - Series view with covers, read/unread, rename series, edit authors and covers from the app.
@@ -92,6 +98,29 @@ The folder name is the series. Renaming or moving files on disk is fine:
 books are recognised by content, so reading progress follows them. Books you
 add from the app are uploaded into the right folder.
 
+### Organising audiobooks
+
+Set `AUDIO_PATH` to your audio folder. It's mounted read-only: PulseReader never
+writes to it.
+
+```
+audio/
+  The Empyrean/
+    cover.jpg                      <- optional series cover
+    01 - Fourth Wing.m4b           <- one file per book; chapters come from the file
+    Fourth Wing.jpg                <- optional cover, with or without the number
+    02 - Iron Flame/               <- or a folder of parts (mp3s, CDs): one book
+      01.mp3
+      02.mp3
+      cover.jpg
+  Standalone.m4b                   <- books in the root are "Uncategorized"
+```
+
+A leading number ("01 - ") orders the books and is left out of the title. With
+no image file, the cover embedded in the audio is used. New books show up the
+next time the Audiobooks tab is opened (within five minutes) or after a Full
+Sync. As with epubs, renaming or moving a book keeps its listening position.
+
 ### HTTPS and reaching it from outside your home
 
 On your home network `http://<ip>:3000` works, but browsers only allow
@@ -122,6 +151,7 @@ renames and covers are written there.
 | `API_KEY` | *(off)* | Key for scripts (`X-API-Key` header, acts as the first admin). |
 | `PORT` | `3000` | Host port. |
 | `BOOKS_PATH` | `./books` | Host folder with your epubs. |
+| `AUDIO_PATH` | `./audio` | Host folder with your audiobooks (mounted read-only). |
 | `DATA_PATH` | `./data` | Host folder for the SQLite database. |
 | `TRUST_PROXY` | `loopback, uniquelocal` | Which proxies to trust for client IP / HTTPS. |
 | `CORS_ORIGIN` | *(off)* | Only if a copy of the app on another origin talks to this server. |
@@ -151,6 +181,14 @@ Installed apps pick up the new version the next time they're opened.
 | `R` | Restart page |
 | `Esc` | Close and stay on the current word |
 
+| Audiobooks | |
+|---|---|
+| `Space` | Play / pause |
+| `←` / `→` | Back 15 / forward 30 seconds |
+| `Shift` + `←` / `→` | Previous / next chapter |
+| `↑` / `↓` | Faster / slower |
+| `Esc` | Back to library |
+
 ## Development
 
 ```bash
@@ -162,7 +200,7 @@ npm run server              # API on :3000 (reads .env)
 npm run dev                 # app on :5173, proxies /api to :3000
 ```
 
-`npm test` runs the tokenizer, path-safety, accounts and scanner tests, and `npm run lint`
+`npm test` runs the tokenizer, path-safety, accounts, scanner and audiobook tests, and `npm run lint`
 runs ESLint. `npm start` builds the app and serves it from the server, the same
 way the Docker image does.
 

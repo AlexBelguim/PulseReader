@@ -28,6 +28,7 @@ WORKDIR /app
 ENV NODE_ENV=production \
     PORT=3000 \
     BOOKS_DIR=/data/books \
+    AUDIO_DIR=/data/audio \
     DATA_DIR=/data
 # API_KEY is passed at runtime (.env / docker-compose), never baked in.
 COPY --from=deps /app/node_modules ./node_modules

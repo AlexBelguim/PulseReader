@@ -18,10 +18,13 @@ services:
     env_file: .env
     environment:
       BOOKS_DIR: /data/books
+      AUDIO_DIR: /data/audio
       DATA_DIR: /data
     volumes:
       # Your epubs, one folder per series. Read-write: uploads, series renames
       # and covers are written here.
       - ${BOOKS_PATH:-./books}:/data/books
+      # Your audiobooks, one folder per series. Only ever read.
+      - ${AUDIO_PATH:-./audio}:/data/audio:ro
       # The SQLite database (catalog + reading progress).
       - ${DATA_PATH:-./data}:/data/db

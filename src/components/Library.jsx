@@ -14,6 +14,7 @@ import {
     Edit3,
     ImagePlus,
     User,
+    Headphones,
 } from 'lucide-react';
 import {
     getBooks,
@@ -32,6 +33,13 @@ import {
     updateServerBook,
 } from '../services/syncService';
 import SyncSettings from './SyncSettings';
+import AudioLibrary from './AudioLibrary';
+import { listAudiobooks } from '../services/audiobooks';
+
+const VIEW_KEY = 'pulsereader-library-view';
+const readView = () => {
+    try { return localStorage.getItem(VIEW_KEY) === 'audio' ? 'audio' : 'books'; } catch { return 'books'; }
+};
 
 const Library = () => {
     const navigate = useNavigate();
@@ -53,12 +61,32 @@ const Library = () => {
     const [authorInput, setAuthorInput] = useState('');
     const [serverStatus, setServerStatus] = useState({ available: false, authenticated: false });
     const [actionError, setActionError] = useState(null);
+    // Audiobooks stream from the server, so they're only here when signed in.
+    const [audiobooks, setAudiobooks] = useState([]);
+    const [view, setViewState] = useState(readView);
+    const setView = (next) => {
+        setViewState(next);
+        try { localStorage.setItem(VIEW_KEY, next); } catch { /* ignore */ }
+    };
+    const showAudio = view === 'audio' && audiobooks.length > 0;
 
     // Find out whether this copy is served by a PulseReader server, and if so
     // whether we're signed in. The library works locally either way.
     useEffect(() => {
         getServerStatus().then(setServerStatus);
     }, []);
+
+    const loadAudiobooks = () => {
+        listAudiobooks().then(setAudiobooks).catch(() => setAudiobooks([]));
+    };
+    useEffect(() => {
+        if (serverStatus.authenticated) loadAudiobooks();
+        else setAudiobooks([]);
+    }, [serverStatus.authenticated]);
+
+    const setAudioProgress = (id, progress) => {
+        setAudiobooks((prev) => prev.map((b) => (b.id === id ? { ...b, progress } : b)));
+    };
 
     // Series and author live on the server, and only admins may change them
     // there. Offline, or with no server at all, the library is yours to edit.
@@ -221,6 +249,8 @@ const Library = () => {
         setBooks(updatedBooks.reverse());
         // Extract covers/authors in background after sync
         extractMissingCovers(updatedBooks);
+        // Full Sync rescans the server, audio folder included.
+        if (serverStatus.authenticated) loadAudiobooks();
     };
 
     // Handle manual cover upload
@@ -678,10 +708,34 @@ const Library = () => {
             </header>
 
             <div className="library-content">
+                {/* Books / Audiobooks, once the server has audiobooks */}
+                {audiobooks.length > 0 && (
+                    <div className="library-tabs" role="tablist">
+                        <button
+                            role="tab"
+                            aria-selected={!showAudio}
+                            className={`library-tab ${!showAudio ? 'active' : ''}`}
+                            onClick={() => setView('books')}
+                        >
+                            <BookOpen size={16} />
+                            Books
+                        </button>
+                        <button
+                            role="tab"
+                            aria-selected={showAudio}
+                            className={`library-tab ${showAudio ? 'active' : ''}`}
+                            onClick={() => setView('audio')}
+                        >
+                            <Headphones size={16} />
+                            Audiobooks
+                        </button>
+                    </div>
+                )}
+
                 {/* Action Buttons (only on main view) */}
-                {!selectedSeries && (
+                {(showAudio || !selectedSeries) && (
                     <div className="library-actions">
-                        <label className={`btn btn-primary ${importing ? 'disabled' : ''}`}>
+                        {!showAudio && <label className={`btn btn-primary ${importing ? 'disabled' : ''}`}>
                             <Plus size={20} />
                             {importing ? 'Importing...' : 'Add Book'}
                             <input
@@ -692,7 +746,7 @@ const Library = () => {
                                 onChange={(e) => handleFileChange(e)}
                                 disabled={importing}
                             />
-                        </label>
+                        </label>}
 
                         {serverStatus.available && (
                             <button
@@ -707,8 +761,16 @@ const Library = () => {
                     </div>
                 )}
 
+                {showAudio && (
+                    <AudioLibrary
+                        audiobooks={audiobooks}
+                        onProgressChange={setAudioProgress}
+                        onError={showActionError}
+                    />
+                )}
+
                 {/* Loading State */}
-                {loading && (
+                {!showAudio && loading && (
                     <div className="library-loading">
                         <motion.div
                             className="loading-spinner"
@@ -720,7 +782,7 @@ const Library = () => {
                 )}
 
                 {/* Empty State */}
-                {!loading && books.length === 0 && (
+                {!showAudio && !loading && books.length === 0 && (
                     <div className="library-empty">
                         <BookOpen size={64} strokeWidth={1} />
                         <h2>Your Library is Empty</h2>
@@ -729,7 +791,7 @@ const Library = () => {
                 )}
 
                 {/* Main Content */}
-                {!loading && books.length > 0 && (
+                {!showAudio && !loading && books.length > 0 && (
                     selectedSeries ? renderSeriesView() : renderSeriesGrid()
                 )}
             </div>

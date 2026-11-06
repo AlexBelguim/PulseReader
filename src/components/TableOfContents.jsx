@@ -1,8 +1,22 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, BookOpen } from 'lucide-react';
 
-const TableOfContents = ({ isOpen, onClose, chapters, currentChapter, onNavigate }) => {
+// Also the audiobook chapter list: `title` and `icon` name the drawer, and a
+// chapter's `detail` (its start time) is shown on the right.
+const TableOfContents = ({
+    isOpen, onClose, chapters, currentChapter, onNavigate,
+    title = 'Table of Contents', icon = BookOpen, emptyText = 'No chapters available',
+}) => {
+    const Icon = icon;
+    const activeRef = useRef(null);
+
+    // A long list opens on the chapter you're in, not at the top.
+    useEffect(() => {
+        if (!isOpen) return undefined;
+        const t = setTimeout(() => activeRef.current?.scrollIntoView({ block: 'center' }), 50);
+        return () => clearTimeout(t);
+    }, [isOpen]);
 
     const handleChapterClick = (chapter) => {
         onNavigate(chapter.href);
@@ -14,6 +28,7 @@ const TableOfContents = ({ isOpen, onClose, chapters, currentChapter, onNavigate
         return items.map((chapter, index) => (
             <React.Fragment key={chapter.id || `${chapter.href}-${index}`}>
                 <motion.button
+                    ref={currentChapter === chapter.href ? activeRef : undefined}
                     className={`toc-item ${currentChapter === chapter.href ? 'active' : ''}`}
                     style={{ paddingLeft: `${20 + level * 16}px` }}
                     onClick={() => handleChapterClick(chapter)}
@@ -21,9 +36,10 @@ const TableOfContents = ({ isOpen, onClose, chapters, currentChapter, onNavigate
                     whileTap={{ scale: 0.98 }}
                     initial={{ opacity: 0, x: 20 }}
                     animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: index * 0.02 }}
+                    transition={{ delay: Math.min(index, 25) * 0.02 }}
                 >
                     <span className="toc-item-label">{chapter.label}</span>
+                    {chapter.detail && <span className="toc-item-detail">{chapter.detail}</span>}
                 </motion.button>
 
                 {chapter.subitems && chapter.subitems.length > 0 && (
@@ -57,8 +73,8 @@ const TableOfContents = ({ isOpen, onClose, chapters, currentChapter, onNavigate
                         {/* Header */}
                         <div className="toc-header">
                             <div className="toc-header-title">
-                                <BookOpen size={20} />
-                                <h2>Table of Contents</h2>
+                                <Icon size={20} />
+                                <h2>{title}</h2>
                             </div>
                             <button className="toc-close-btn" onClick={onClose}>
                                 <X size={24} />
@@ -71,7 +87,7 @@ const TableOfContents = ({ isOpen, onClose, chapters, currentChapter, onNavigate
                                 renderChapters(chapters)
                             ) : (
                                 <div className="toc-empty">
-                                    <p>No chapters available</p>
+                                    <p>{emptyText}</p>
                                 </div>
                             )}
                         </div>
