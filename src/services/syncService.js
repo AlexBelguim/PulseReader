@@ -313,6 +313,30 @@ export function planFromServer(local, server) {
     return { position, read };
 }
 
+/**
+ * Whether Full Sync should fetch a matched book's file again: 'download' when
+ * the server's copy is no longer the one on this device, 'adopt' to just note
+ * the server's hash, null to leave it be.
+ *
+ * A book counted as synced forever once it matched, so an epub replaced on the
+ * server (a fixed chapter, a longer edition under the same name) never reached
+ * a device that already had it. The hash remembered at download time is what
+ * tells them apart. Books from before it was stored have only their size to go
+ * on, and only when the file came from the server in the first place: a book
+ * imported here that merely shares a title keeps its own file.
+ */
+export function fileRefresh(localBook, serverBook) {
+    const serverHash = serverBook.file_hash || null;
+    if (localBook.fileHash && serverHash) {
+        return localBook.fileHash === serverHash ? null : 'download';
+    }
+    const localSize = localFileSize(localBook);
+    if (localBook.syncId && localSize && serverBook.file_size && localSize !== serverBook.file_size) {
+        return 'download';
+    }
+    return serverHash && !localBook.fileHash ? 'adopt' : null;
+}
+
 const fromStatusRow = (b) => ({
     location: b.last_read, progress: b.progress, updatedAt: b.progress_updated_at,
     isRead: b.is_read === 1, readAt: b.read_updated_at,
@@ -504,7 +528,8 @@ export async function updateServerBook(bookId, updates) {
  * 0. Trigger server rescan so the DB reflects current disk state
  * 1. Get server book list
  * 2. Match local books to server books (by syncId, title, or file size)
- * 3. Update local metadata from server for matched books
+ * 3. Update local metadata from server for matched books, and fetch again
+ *    the ones whose file changed on the server
  * 4. Upload local covers to server for matched books missing server covers
  * 5. Download new server books not found locally
  * 6. Upload truly new local books (no syncId = never been on server) to server
@@ -515,14 +540,19 @@ export async function updateServerBook(bookId, updates) {
  * `onProgress` (optional) is called as the sync moves along, so a long one
  * doesn't look stalled: { step, message } for each phase, plus { index, total,
  * title, loaded, size } while books download.
+ *
+ * `replaceFileFn(localId, epubData, fileHash)` (optional) swaps in a newer
+ * file for a book this device already has; without it such books are left on
+ * their old file.
  */
-export async function performFullSync(localBooks, addBookFn, updateProgressFn, updateBookFn, deleteBookFn, onProgress = () => {}) {
+export async function performFullSync(localBooks, addBookFn, updateProgressFn, updateBookFn, deleteBookFn, onProgress = () => {}, replaceFileFn = null) {
     if (!isServerConnected()) {
         return { synced: false, reason: 'Not signed in to the PulseReader server' };
     }
 
     const results = {
         downloaded: 0,
+        refreshed: 0,
         uploaded: 0,
         updated: 0,
         deleted: 0,
@@ -597,11 +627,19 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
         }
 
         // --- Step 1: Update local metadata from server for matched books ---
+        const toRefresh = []; // matched books whose file changed on the server
         for (const { localBook, serverBook } of matchedPairs) {
             const updates = {};
 
             if (!localBook.syncId) {
                 updates.syncId = serverBook.id;
+            }
+
+            const refresh = fileRefresh(localBook, serverBook);
+            if (refresh === 'adopt') {
+                updates.fileHash = serverBook.file_hash;
+            } else if (refresh === 'download' && replaceFileFn) {
+                toRefresh.push({ localBook, serverBook });
             }
 
             if (serverBook.title && serverBook.title !== localBook.title) {
@@ -647,6 +685,22 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
             }
         }
 
+        // --- Step 1b: Fetch again the books whose file changed on the server ---
+        // The reading position stays: it is the same book, and a place that
+        // lands a little off beats starting over.
+        for (const [i, { localBook, serverBook }] of toRefresh.entries()) {
+            const status = { step: 'download', index: i + 1, total: toRefresh.length, title: serverBook.title };
+            onProgress({ ...status, loaded: 0, size: serverBook.file_size || 0 });
+            try {
+                const epubData = await downloadBook(serverBook.id, (loaded, size) =>
+                    onProgress({ ...status, loaded, size: size || serverBook.file_size || 0 }));
+                await replaceFileFn(localBook.id, epubData, serverBook.file_hash || null);
+                results.refreshed++;
+            } catch (err) {
+                results.errors.push(`Failed to update the file of "${serverBook.title}": ${err.message}`);
+            }
+        }
+
         // --- Step 2: Download books that exist on server but not locally ---
         const toDownload = serverBooks.filter((b) => !matchedServerIds.has(b.id));
         for (const [i, serverBook] of toDownload.entries()) {
@@ -671,6 +725,7 @@ export async function performFullSync(localBooks, addBookFn, updateProgressFn, u
                     progressAt: serverBook.progress_updated_at || null,
                     readAt: serverBook.read_updated_at || null,
                     syncId: serverBook.id,
+                    fileHash: serverBook.file_hash || null,
                 });
 
                 results.downloaded++;

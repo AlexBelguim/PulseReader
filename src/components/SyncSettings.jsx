@@ -24,7 +24,7 @@ import {
     pullProgress,
     triggerRescan,
 } from '../services/syncService';
-import { addBook, updateBookProgress, updateBook, deleteBook, resetAllProgress } from '../services/db';
+import { addBook, updateBookProgress, updateBook, deleteBook, replaceBookFile, resetAllProgress } from '../services/db';
 import UserManagement from './UserManagement';
 
 const formatMB = (bytes) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -162,7 +162,8 @@ const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onC
                 async (id) => {
                     await deleteBook(id);
                 },
-                showProgress
+                showProgress,
+                replaceBookFile
             );
 
             setSyncResult(result);
@@ -495,6 +496,11 @@ const SyncSettings = ({ books, serverStatus, onStatusChange, onSyncComplete, onC
                                                 {syncResult.downloaded > 0 && (
                                                     <p>
                                                         <Download size={12} /> {syncResult.downloaded} books downloaded
+                                                    </p>
+                                                )}
+                                                {syncResult.refreshed > 0 && (
+                                                    <p>
+                                                        <Download size={12} /> {syncResult.refreshed} books replaced with the server's newer file
                                                     </p>
                                                 )}
                                                 {syncResult.uploaded > 0 && (

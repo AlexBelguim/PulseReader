@@ -1,6 +1,6 @@
 // Client side of "most recent reading wins": what Pull / Full Sync take from
 // the server for one book. The plane case is the reason this exists.
-import { isNewer, planFromServer } from '../src/services/syncService.js';
+import { fileRefresh, isNewer, planFromServer } from '../src/services/syncService.js';
 
 const results = [];
 const check = (n, pass, detail = '') => results.push({ n, pass, detail });
@@ -47,6 +47,18 @@ plan = planFromServer({ isRead: false, readAt: null }, { isRead: true, readAt: n
 check('legacy server "read" still applies to an untouched book', plan.read?.isRead === true);
 plan = planFromServer({ isRead: false, readAt: at(1) }, { isRead: true, readAt: null });
 check('but not over a flag changed on this device', plan.read === null);
+
+// A book replaced on the server: Full Sync fetches the file again.
+const onServer = { id: 's1', file_hash: 'new', file_size: 2000 };
+check('a changed file is fetched again', fileRefresh({ syncId: 's1', fileHash: 'old', fileSize: 1000 }, onServer) === 'download');
+check('the same file is left alone', fileRefresh({ syncId: 's1', fileHash: 'new', fileSize: 2000 }, onServer) === null);
+check('same size, new hash: still fetched', fileRefresh({ syncId: 's1', fileHash: 'old', fileSize: 2000 }, onServer) === 'download');
+// Books synced before the hash was remembered have only their size to go on.
+check('an older synced book with another size is fetched', fileRefresh({ syncId: 's1', fileSize: 1000 }, onServer) === 'download');
+check('an older synced book of the same size takes the hash', fileRefresh({ syncId: 's1', fileSize: 2000 }, onServer) === 'adopt');
+// Imported here and only now matched by title: its own file stays.
+check('a book imported on this device keeps its file', fileRefresh({ fileSize: 1000 }, onServer) === 'adopt');
+check('a server without hashes changes nothing', fileRefresh({ syncId: 's1', fileHash: 'old', fileSize: 2000 }, { id: 's1', file_size: 2000 }) === null);
 
 for (const r of results) console.log(`${r.pass ? 'PASS' : 'FAIL'}  ${r.n}${r.pass ? '' : `  (${r.detail})`}`);
 const passed = results.filter((r) => r.pass).length;

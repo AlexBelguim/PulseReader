@@ -164,6 +164,26 @@ export const getBookData = async (id) => {
     return (await db.get('files', id))?.data;
 };
 
+/**
+ * Swap a book's epub for a newer copy of the same book. The record keeps its
+ * id and its reading position; the locations cache goes, because it was
+ * computed from the old text.
+ */
+export const replaceBookFile = async (id, data, fileHash = null) => {
+    const db = await initDB();
+    const tx = db.transaction(['books', 'files', 'locations'], 'readwrite');
+    const book = await tx.objectStore('books').get(id);
+    if (!book) {
+        await tx.done;
+        throw new Error('the book is no longer on this device');
+    }
+    // The file and the size and hash that describe it change together.
+    await tx.objectStore('files').put({ bookId: id, data });
+    await tx.objectStore('books').put({ ...book, fileSize: data?.byteLength ?? data?.size ?? 0, fileHash });
+    await tx.objectStore('locations').delete(id);
+    await tx.done;
+};
+
 export const updateBook = async (id, updates) => {
     const db = await initDB();
 
